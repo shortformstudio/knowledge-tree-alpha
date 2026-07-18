@@ -1,0 +1,453 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --text-primary: #e6f9f9;
+    --text-secondary: #8ab8b8;
+    --accent-cyan: #4dffd2;
+    --accent-aqua: #00f0ff;
+  }
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; width: 100%; height: 100%; }
+  body { font-family: 'Avenir Next', -apple-system, sans-serif; font-weight: 200; text-transform: lowercase; }
+  #stage { width: 100%; height: 100%; cursor: grab; }
+  #stage.dragging { cursor: grabbing; }
+  #stage.hovering { cursor: pointer; }
+  #gateway {
+    position: absolute;
+    pointer-events: none;
+    max-width: 250px;
+    padding: 9px 12px;
+    background: rgba(6, 32, 32, 0.82);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(0, 240, 255, 0.18);
+    border-radius: 10px;
+    box-shadow: 0 8px 28px rgba(0,0,0,0.5), 0 0 18px rgba(0,240,255,0.10);
+    color: var(--text-primary);
+    opacity: 0;
+    transition: opacity 0.22s cubic-bezier(0.25,0.8,0.25,1);
+    z-index: 10;
+  }
+  #gateway::after {
+    content: '';
+    position: absolute; inset: 4px;
+    border: 1px dashed rgba(0, 240, 255, 0.16);
+    border-radius: 7px;
+  }
+  #gateway .g-label {
+    font-size: 8px; letter-spacing: 1.5px; color: var(--accent-cyan);
+    text-shadow: 0 0 8px rgba(77,255,210,0.5); margin-bottom: 3px;
+  }
+  #gateway .g-title { font-size: 13px; font-weight: 400; line-height: 1.25; }
+  #gateway .g-meta { font-size: 9px; color: var(--text-secondary); margin-top: 4px; font-family: ui-monospace, monospace; }
+  #empty {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: var(--text-secondary); gap: 4px; pointer-events: none;
+    transition: opacity 0.4s;
+  }
+  #empty .e-big { font-size: 17px; font-weight: 100; opacity: 0.85; }
+  #empty .e-small { font-size: 10px; opacity: 0.5; }
+  #altitude {
+    position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    pointer-events: none; opacity: 0.55;
+  }
+  #altitude .a-track { width: 1px; height: 110px; background: rgba(0,240,255,0.18); position: relative; }
+  #altitude .a-dot {
+    position: absolute; left: -2.5px; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent-cyan); box-shadow: 0 0 8px rgba(77,255,210,0.8);
+    transition: top 0.15s linear;
+  }
+  #altitude .a-label { font-size: 8px; color: var(--text-secondary); letter-spacing: 1px; writing-mode: vertical-rl; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="gateway">
+  <div class="g-label">conceptual gateway</div>
+  <div class="g-title"></div>
+  <div class="g-meta"></div>
+</div>
+<div id="empty">
+  <div class="e-big">the trunk awaits its rings</div>
+  <div class="e-small">compile knowledge to grow bark</div>
+</div>
+<div id="altitude">
+  <div class="a-track"><div class="a-dot" style="top:104px"></div></div>
+  <div class="a-label">ascent</div>
+</div>
+<script src="three.min.js"></script>
+<script>
+"use strict";
+// PART_CORE
+function post(msg) {
+  try { window.webkit.messageHandlers.trunk.postMessage(msg); } catch (e) {}
+}
+window.onerror = function (message, source, line) {
+  post({ type: "log", level: "error", message: "trunk model: " + message + " (line " + line + ")" });
+};
+
+// -- deterministic pseudo-noise ------------------------------------------
+function hash2(x, y) {
+  const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
+  return s - Math.floor(s);
+}
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi), b = hash2(xi + 1, yi);
+  const c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function fbm(x, y) {
+  let total = 0, amp = 0.5, freq = 1;
+  for (let i = 0; i < 4; i++) {
+    total += vnoise(x * freq, y * freq) * amp;
+    amp *= 0.5; freq *= 2.03;
+  }
+  return total;
+}
+function strHash(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+// -- constants of the helical memory --------------------------------------
+const GOLDEN = Math.PI * (3 - Math.sqrt(5));   // 2.39996... irrational vs 2π: bark never repeats
+const PITCH_PER_NODE = 0.62;                   // vertical rise between successive memories
+const K_HELIX = PITCH_PER_NODE / GOLDEN;       // helical lock: metres of ascent per radian of spin
+const RADIUS = 1.9;
+
+// -- scene -----------------------------------------------------------------
+const stage = document.getElementById("stage");
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x000000, 0);
+stage.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
+camera.position.set(0, 0.6, RADIUS * 3.6);
+camera.lookAt(0, 0, 0);
+
+const keyLight = new THREE.DirectionalLight(0x9ffcf0, 2.4);
+keyLight.position.set(3.5, 4, 5);
+scene.add(keyLight);
+const rimLight = new THREE.DirectionalLight(0x00f0ff, 1.1);
+rimLight.position.set(-5, -2, -3);
+scene.add(rimLight);
+scene.add(new THREE.AmbientLight(0x0a2c2c, 2.2));
+const glowLight = new THREE.PointLight(0x4dffd2, 0.0, 9);
+glowLight.position.set(0, 0, RADIUS * 1.7);
+scene.add(glowLight);
+
+const trunkGroup = new THREE.Group();
+scene.add(trunkGroup);
+
+let graphNodes = [];
+let placed = [];          // {node, angle, y, sigma, amp, marker, dot}
+let markers = [];
+let trunkMesh = null;
+let edgeLines = null;
+let theta = 0;            // current spin (radians)
+let thetaTarget = 0;
+let thetaMin = 0, thetaMax = 0;
+let spinVelocity = 0;
+// PART_GEOMETRY
+// axis sway: the trunk curves around itself as it climbs
+function swayX(y) { return 0.22 * Math.sin(y * 0.31) + 0.12 * Math.sin(y * 0.113 + 2.1); }
+function swayZ(y) { return 0.20 * Math.cos(y * 0.27 + 1.3) + 0.10 * Math.sin(y * 0.091); }
+function baseRadius(y, height) {
+  const taper = 1 - 0.12 * (y / Math.max(height, 1));
+  return RADIUS * taper * (1 + 0.05 * Math.sin(y * 0.5 + 0.7));
+}
+
+function angleDist(a, b) {
+  let d = a - b;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return d;
+}
+
+function disposeTrunk() {
+  if (trunkMesh) { trunkGroup.remove(trunkMesh); trunkMesh.geometry.dispose(); trunkMesh.material.dispose(); }
+  if (edgeLines) { trunkGroup.remove(edgeLines); edgeLines.geometry.dispose(); edgeLines.material.dispose(); }
+  for (const p of placed) {
+    if (p.marker) trunkGroup.remove(p.marker);
+    if (p.dot) trunkGroup.remove(p.dot);
+  }
+  trunkMesh = null; edgeLines = null; placed = []; markers = [];
+}
+
+window.setGraph = function (graph) {
+  disposeTrunk();
+  graphNodes = graph.nodes || [];
+  const edges = graph.edges || [];
+  document.getElementById("empty").style.opacity = graphNodes.length ? 0 : 1;
+  if (!graphNodes.length) { thetaMin = thetaMax = thetaTarget = theta = 0; return; }
+
+  // memories sorted along the growth path: oldest knowledge lowest on the trunk
+  const ordered = graphNodes.slice().sort(function (a, b) {
+    return (a.depth - b.depth) || (a.order - b.order);
+  });
+  const n = ordered.length;
+  const maxChars = Math.max.apply(null, ordered.map(function (m) { return m.chars; }).concat([1]));
+  const height = n * PITCH_PER_NODE + 8;
+  const yBase = -2;   // first memory sits at world y 0, the camera's reading band
+
+  placed = ordered.map(function (node, i) {
+    const jitter = (hash2(strHash(node.id) % 977, 13.7) - 0.5) * 0.3;
+    const weight = Math.pow(Math.min(node.chars / maxChars, 1), 0.5);
+    return {
+      node: node,
+      angle: i * GOLDEN,
+      y: yBase + 2 + i * PITCH_PER_NODE + jitter,
+      sigma: 0.16 + 0.30 * weight,          // indent breadth from knowledge mass
+      amp: 0.10 + 0.26 * weight,            // indent depth from knowledge mass
+    };
+  });
+
+  // ---- bark surface -------------------------------------------------------
+  const radialSegs = 200;
+  const heightSegs = Math.min(Math.max(Math.round(height * 7), 60), 480);
+  const geo = new THREE.CylinderGeometry(1, 1, height, radialSegs, heightSegs, true);
+  geo.translate(0, height / 2 + yBase, 0);
+  const pos = geo.attributes.position;
+  const colors = new Float32Array(pos.count * 3);
+  const barkDeep = new THREE.Color(0x061b1b);
+  const barkMid = new THREE.Color(0x0d3534);
+  const barkLit = new THREE.Color(0x1a5a52);
+  const glowCol = new THREE.Color(0x4dffd2);
+  const tmp = new THREE.Color();
+
+  for (let i = 0; i < pos.count; i++) {
+    const vx = pos.getX(i), vy = pos.getY(i), vz = pos.getZ(i);
+    const ang = Math.atan2(vx, vz);
+    const age = 1 - (vy - yBase) / height;   // older bark lower: rougher, deeper features
+
+    // ridged striations that wander as they climb — bark grain
+    const drift = fbm(vy * 0.16, 3.3) * 4.0;
+    const ridge = Math.abs(Math.sin(ang * 9 + drift + fbm(ang * 2.2, vy * 0.5) * 2.4));
+    const grain = fbm(ang * 3.1 + 11.7, vy * 1.15);
+    let r = baseRadius(vy, height)
+      + (0.30 + 0.35 * age) * 0.16 * (1 - ridge)
+      + 0.10 * (grain - 0.5)
+      + 0.035 * (0.5 + 0.5 * age) * (vnoise(ang * 14, vy * 6) - 0.5);
+
+    // carve the memories: gaussian indents, aging wider + shallower-edged
+    let indent = 0;
+    for (let k = 0; k < placed.length; k++) {
+      const p = placed[k];
+      const dy = vy - p.y;
+      if (dy > 2.5 || dy < -2.5) continue;
+      const da = angleDist(ang, p.angle) * r;
+      const s = p.sigma * (1 + 0.35 * age);
+      const g = Math.exp(-(da * da + dy * dy) / (2 * s * s));
+      indent += p.amp * g;
+    }
+    indent = Math.min(indent, 0.42);
+    r -= indent;
+
+    pos.setX(i, Math.sin(ang) * r + swayX(vy));
+    pos.setZ(i, Math.cos(ang) * r + swayZ(vy));
+
+    // colour: lit ridge crests, deep grooves, cyan breath inside the memories
+    const crest = 1 - ridge;
+    tmp.copy(barkDeep).lerp(barkMid, 0.35 + 0.65 * crest).lerp(barkLit, crest * crest * 0.4 * (1 - age * 0.5));
+    tmp.lerp(glowCol, Math.min(indent * 2.4, 0.55));
+    colors[i * 3] = tmp.r; colors[i * 3 + 1] = tmp.g; colors[i * 3 + 2] = tmp.b;
+  }
+  geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  geo.computeVertexNormals();
+
+  trunkMesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+    vertexColors: true, roughness: 0.88, metalness: 0.08,
+  }));
+  trunkGroup.add(trunkMesh);
+  buildMarkersAndEdges(edges, height);
+
+  thetaMin = -(n - 1) * GOLDEN - 0.8;
+  thetaMax = 0.8;
+  thetaTarget = Math.max(thetaMin, Math.min(thetaMax, thetaTarget));
+  post({ type: "log", level: "info", message: "trunk grown — " + n + " memories carved into the bark" });
+};
+
+function surfacePoint(angle, y, height, lift) {
+  const r = baseRadius(y, height) + (lift || 0.06);
+  return new THREE.Vector3(Math.sin(angle) * r + swayX(y), y, Math.cos(angle) * r + swayZ(y));
+}
+
+function buildMarkersAndEdges(edges, height) {
+  const markerMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.0, depthWrite: false });
+  for (const p of placed) {
+    const center = surfacePoint(p.angle, p.y, height, -p.amp * 0.5);
+    const marker = new THREE.Mesh(new THREE.SphereGeometry(Math.max(p.sigma * 1.35, 0.24), 10, 10), markerMat.clone());
+    marker.position.copy(center);
+    marker.userData.nodeId = p.node.id;
+    trunkGroup.add(marker);
+    markers.push(marker);
+    p.marker = marker;
+
+    const dot = new THREE.Mesh(
+      new THREE.SphereGeometry(0.035 + p.sigma * 0.12, 8, 8),
+      new THREE.MeshBasicMaterial({ color: 0x4dffd2, transparent: true, opacity: 0.5 })
+    );
+    dot.position.copy(surfacePoint(p.angle, p.y, height, 0.02 - p.amp * 0.6));
+    trunkGroup.add(dot);
+    p.dot = dot;
+  }
+
+  // knowledge curves around itself: helical arcs across the bark between linked memories
+  const byId = {};
+  for (const p of placed) byId[p.node.id] = p;
+  const pts = [];
+  let drawn = 0;
+  for (const e of edges) {
+    const a = byId[e.source], b = byId[e.target];
+    if (!a || !b || drawn > 400) continue;
+    drawn++;
+    const steps = 14;
+    for (let s = 0; s < steps; s++) {
+      const t0 = s / steps, t1 = (s + 1) / steps;
+      for (const t of [t0, t1]) {
+        const ang = a.angle + (b.angle - a.angle) * t;
+        const y = a.y + (b.y - a.y) * t;
+        const bulge = 0.10 * Math.sin(Math.PI * t);
+        pts.push(surfacePoint(ang, y, height, 0.05 + bulge));
+      }
+    }
+  }
+  if (pts.length) {
+    const g = new THREE.BufferGeometry().setFromPoints(pts);
+    edgeLines = new THREE.LineSegments(g, new THREE.LineBasicMaterial({
+      color: 0x00f0ff, transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending,
+    }));
+    trunkGroup.add(edgeLines);
+  }
+}
+// PART_INTERACTION
+const gateway = document.getElementById("gateway");
+const altitudeDot = document.querySelector("#altitude .a-dot");
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2(-2, -2);
+let pointerClient = { x: 0, y: 0 };
+let dragging = false, dragMoved = 0, lastX = 0, downTime = 0;
+let hoveredId = null;
+
+stage.addEventListener("pointerdown", function (e) {
+  dragging = true; dragMoved = 0; lastX = e.clientX; downTime = performance.now();
+  spinVelocity = 0;
+  stage.classList.add("dragging");
+  stage.setPointerCapture(e.pointerId);
+});
+stage.addEventListener("pointermove", function (e) {
+  pointerClient = { x: e.clientX, y: e.clientY };
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+  if (dragging) {
+    const dx = e.clientX - lastX;
+    lastX = e.clientX;
+    dragMoved += Math.abs(dx);
+    const dTheta = dx * 0.0075;
+    thetaTarget = clampTheta(thetaTarget + dTheta);
+    spinVelocity = dTheta;
+  }
+});
+stage.addEventListener("pointerup", function (e) {
+  stage.classList.remove("dragging");
+  const quick = performance.now() - downTime < 350;
+  if (dragging && dragMoved < 4 && quick && hoveredId) {
+    post({ type: "open", id: hoveredId });
+  }
+  dragging = false;
+});
+stage.addEventListener("pointerleave", function () {
+  dragging = false;
+  stage.classList.remove("dragging");
+  pointer.x = -2; pointer.y = -2;
+});
+stage.addEventListener("wheel", function (e) {
+  e.preventDefault();
+  // scrolling ascends/descends: the same helical lock, driven vertically
+  thetaTarget = clampTheta(thetaTarget + e.deltaY * 0.004);
+}, { passive: false });
+
+function clampTheta(t) {
+  return Math.max(thetaMin, Math.min(thetaMax, t));
+}
+
+function updateHover() {
+  if (!markers.length || dragging) { if (dragging) return; }
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(markers, false);
+  const hit = hits.length ? hits[0].object : null;
+  const id = hit ? hit.userData.nodeId : null;
+  if (id !== hoveredId) {
+    hoveredId = id;
+    stage.classList.toggle("hovering", !!id);
+    if (id) {
+      const p = placed.find(function (q) { return q.node.id === id; });
+      if (p) {
+        gateway.querySelector(".g-title").textContent = p.node.title;
+        gateway.querySelector(".g-meta").textContent =
+          "d" + p.node.depth + " · " + p.node.chars + " chars · " + p.node.host;
+        gateway.style.opacity = 1;
+        glowLight.intensity = 1.4;
+        p.dot.material.opacity = 1;
+        p.dot.scale.setScalar(1.8);
+      }
+    } else {
+      gateway.style.opacity = 0;
+      glowLight.intensity = 0;
+      for (const p of placed) { p.dot.material.opacity = 0.5; p.dot.scale.setScalar(1); }
+    }
+  }
+  if (hoveredId) {
+    gateway.style.left = Math.min(pointerClient.x + 16, stage.clientWidth - 260) + "px";
+    gateway.style.top = Math.max(pointerClient.y - 14, 8) + "px";
+  }
+}
+
+function resize() {
+  const w = stage.clientWidth || 2, h = stage.clientHeight || 2;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(stage);
+resize();
+
+let lastFrame = performance.now();
+function animate(now) {
+  requestAnimationFrame(animate);
+  const dt = Math.min((now - lastFrame) / 1000, 0.05);
+  lastFrame = now;
+
+  if (!dragging && Math.abs(spinVelocity) > 0.00004) {
+    thetaTarget = clampTheta(thetaTarget + spinVelocity);
+    spinVelocity *= Math.pow(0.052, dt);          // inertia decay
+  }
+  theta += (thetaTarget - theta) * Math.min(dt * 7.5, 1);
+
+  // the helical lock: spinning the trunk ascends the memory path — no loop, ever
+  trunkGroup.rotation.y = theta;
+  trunkGroup.position.y = theta * K_HELIX;
+
+  if (thetaMax > thetaMin) {
+    const progress = (thetaMax - theta) / (thetaMax - thetaMin);
+    altitudeDot.style.top = (104 - progress * 104) + "px";
+  }
+
+  updateHover();
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(animate);
+post({ type: "ready" });
+</script>
+</body>
+</html>

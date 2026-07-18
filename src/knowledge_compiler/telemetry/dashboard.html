@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KDC Telemetry Dashboard</title>
+<style>
+  :root {
+    --bg: #0b1120;
+    --surface: #111827;
+    --border: #1e293b;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --accent-dim: #0c4a6e;
+    --success: #34d399;
+    --warn: #fbbf24;
+    --error: #f87171;
+    --font: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 12px;
+    line-height: 1.5;
+    min-height: 100vh;
+    padding: 16px;
+  }
+
+  h1 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  /* ---- Layout ---- */
+  .dashboard {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: auto auto 1fr;
+    gap: 12px;
+    height: calc(100vh - 32px);
+  }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    overflow: auto;
+  }
+
+  .stats     { grid-column: 1; grid-row: 1; }
+  .controls  { grid-column: 2; grid-row: 1; }
+  .events    { grid-column: 1; grid-row: 2 / 4; }
+  .graph     { grid-column: 2; grid-row: 2 / 4; }
+
+  /* ---- Stats ---- */
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+
+  .stat-card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    text-align: center;
+    cursor: default;
+    transition: border-color 0.15s;
+  }
+
+  .stat-card:hover {
+    border-color: var(--accent);
+  }
+
+  .stat-value {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--accent);
+  }
+
+  .stat-label {
+    font-size: 10px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-top: 2px;
+  }
+
+  /* ---- Events ---- */
+  .event-list {
+    list-style: none;
+    font-size: 11px;
+  }
+
+  .event-item {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .event-time { color: var(--muted); min-width: 85px; }
+  .event-type {
+    font-weight: 600;
+    min-width: 130px;
+  }
+  .event-type.type-fetch     { color: var(--accent); }
+  .event-type.type-crawl     { color: var(--success); }
+  .event-type.type-graph     { color: var(--warn); }
+  .event-type.type-semantic  { color: #c084fc; }
+  .event-type.type-social    { color: #fb923c; }
+  .event-payload { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex:1; }
+
+  /* ---- Controls ---- */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 12px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.12s;
+  }
+
+  .btn:hover {
+    border-color: var(--accent);
+    background: var(--accent-dim);
+  }
+
+  .btn-group { display: flex; gap: 6px; flex-wrap: wrap; }
+
+  /* ---- Graph explorer ---- */
+  .graph-node {
+    display: inline-block;
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    margin: 0 2px 4px 0;
+    font-size: 10px;
+    cursor: pointer;
+    transition: all 0.12s;
+    position: relative;
+  }
+
+  .graph-node:hover {
+    border-color: var(--accent);
+    background: var(--accent-dim);
+  }
+
+  .graph-node.webpage        { color: var(--accent); }
+  .graph-node.social_post    { color: #fb923c; }
+  .graph-node.social_profile { color: #c084fc; }
+
+  .edge-line {
+    color: var(--muted);
+    font-size: 10px;
+    padding: 1px 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* ---- Hover telemetry info box ---- */
+  .info-box {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    z-index: 9999;
+    max-width: 340px;
+    padding: 12px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 0.15s, transform 0.15s;
+    pointer-events: none;
+  }
+
+  .info-box.active {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .info-box .ib-title {
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 4px;
+    font-size: 12px;
+  }
+
+  .info-box .ib-body {
+    color: var(--muted);
+  }
+
+  .empty-state {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--muted);
+    font-style: italic;
+  }
+</style>
+</head>
+<body>
+<div class="dashboard">
+  <div class="panel stats">
+    <h1>Graph Stats</h1>
+    <div class="stat-grid">
+      <div class="stat-card" data-info="Total unique entities (URLs, concepts, profiles) stored in the directed graph">
+        <div class="stat-value" id="stat-nodes">0</div>
+        <div class="stat-label">Nodes</div>
+      </div>
+      <div class="stat-card" data-info="Total directed relationships (links, citations, declarations) connecting nodes">
+        <div class="stat-value" id="stat-edges">0</div>
+        <div class="stat-label">Edges</div>
+      </div>
+      <div class="stat-card" data-info="Number of events emitted through the observable bus since server start">
+        <div class="stat-value" id="stat-events">0</div>
+        <div class="stat-label">Events</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel controls">
+    <h1>Telemetry Controls</h1>
+    <div class="btn-group">
+      <button class="btn" id="btn-refresh" data-info="Poll the latest event log and graph statistics from the server">Refresh</button>
+      <button class="btn" id="btn-clear" data-info="Clear the in-memory event history buffer (does not affect graph data)">Clear Log</button>
+      <button class="btn" id="btn-pause" data-info="Pause / resume the live event feed">Pause</button>
+    </div>
+  </div>
+
+  <div class="panel events">
+    <h1>Event Stream</h1>
+    <div id="events-container">
+      <div class="empty-state">No events recorded. Run a crawl or dossier compile to populate.</div>
+    </div>
+  </div>
+
+  <div class="panel graph">
+    <h1>Knowledge Graph Explorer</h1>
+    <div id="graph-container">
+      <div class="empty-state">Run <code>kdc_scrape_website_to_graph</code> to populate the graph.</div>
+    </div>
+  </div>
+</div>
+
+<!-- Hover telemetry info box -->
+<div class="info-box" id="info-box">
+  <div class="ib-title" id="ib-title"></div>
+  <div class="ib-body" id="ib-body"></div>
+</div>
+
+<script>
+  const infoBox = document.getElementById('info-box');
+  const ibTitle = document.getElementById('ib-title');
+  const ibBody  = document.getElementById('ib-body');
+
+  let paused = false;
+
+  function showInfo(title, body) {
+    ibTitle.textContent = title;
+    ibBody.textContent = body;
+    infoBox.classList.add('active');
+  }
+
+  function hideInfo() {
+    infoBox.classList.remove('active');
+  }
+
+  // Attach hover listeners to all [data-info] elements
+  document.querySelectorAll('[data-info]').forEach(el => {
+    el.addEventListener('mouseenter', () => {
+      let title = el.tagName + (el.id ? ' #' + el.id : '') + (el.className ? ' .' + el.className.split(' ')[0] : '');
+      if (el.classList.contains('stat-card')) {
+        title = el.querySelector('.stat-label')?.textContent || 'Statistic';
+      }
+      showInfo(title, el.dataset.info);
+    });
+    el.addEventListener('mouseleave', hideInfo);
+  });
+
+  // Delegate hover for dynamically added elements
+  document.addEventListener('mouseover', (e) => {
+    const target = e.target.closest('[data-info]');
+    if (target) {
+      let title = target.tagName + (target.id ? ' #' + target.id : '');
+      if (target.classList.contains('graph-node')) {
+        title = 'Graph Node: ' + target.dataset.info;
+      }
+      showInfo(title, target.dataset.info);
+    }
+  }, true);
+
+  document.addEventListener('mouseout', (e) => {
+    if (e.target.closest('[data-info]')) {
+      hideInfo();
+    }
+  }, true);
+
+  // ------------------------------------------------------------------
+  // Simulated demo data (in production, poll /events endpoint)
+  // ------------------------------------------------------------------
+
+  const demoTimeline = [
+    { time: '12:00:01.100', type: 'fetch:start',      payload: 'GET https://example.com' },
+    { time: '12:00:01.350', type: 'fetch:success',     payload: '200 OK, 14.2 KB' },
+    { time: '12:00:01.360', type: 'crawl:node_visited', payload: 'https://example.com depth=0' },
+    { time: '12:00:01.400', type: 'graph:node_added',  payload: 'id=https://example.com type=webpage' },
+    { time: '12:00:01.450', type: 'fetch:start',       payload: 'GET /about' },
+    { time: '12:00:01.700', type: 'fetch:success',     payload: '200 OK, 8.1 KB' },
+    { time: '12:00:01.710', type: 'crawl:node_visited', payload: 'https://example.com/about depth=1' },
+    { time: '12:00:01.720', type: 'graph:node_added',  payload: 'id=/about type=webpage' },
+    { time: '12:00:01.730', type: 'graph:edge_added',  payload: 'source=/ → target=/about relation=links_to' },
+    { time: '12:00:01.800', type: 'crawl:complete',     payload: 'nodes=2 edges=1' },
+    { time: '12:00:02.100', type: 'social:compile_start', payload: 'handle=alice platform=twitter' },
+    { time: '12:00:02.400', type: 'social:compile_complete', payload: 'handle=alice post_count=15' },
+  ];
+
+  let demoIdx = 0;
+  let autoFeed = null;
+
+  function getEventTypeClass(evtType) {
+    const cat = evtType.split(':')[0];
+    return 'type-' + cat;
+  }
+
+  function renderEvents(events) {
+    const container = document.getElementById('events-container');
+    if (events.length === 0) {
+      container.innerHTML = '<div class="empty-state">No events recorded.</div>';
+      document.getElementById('stat-events').textContent = 0;
+      return;
+    }
+
+    const ul = document.createElement('ul');
+    ul.className = 'event-list';
+    events.slice(-50).forEach(evt => {
+      const li = document.createElement('li');
+      li.className = 'event-item';
+      li.innerHTML = `<span class="event-time">${evt.time}</span>` +
+        `<span class="event-type ${getEventTypeClass(evt.type)}">${evt.type}</span>` +
+        `<span class="event-payload" data-info="${evt.type}: ${evt.payload} — An event emitted by the ${evt.type.split(':')[0]} subsystem during dataflow execution">${evt.payload}</span>`;
+      ul.appendChild(li);
+    });
+    container.innerHTML = '';
+    container.appendChild(ul);
+    document.getElementById('stat-events').textContent = events.length;
+  }
+
+  function renderGraph(events) {
+    const container = document.getElementById('graph-container');
+    const nodes = new Map();
+    const edges = [];
+
+    events.forEach(evt => {
+      if (evt.type === 'graph:node_added') {
+        const payload = evt.payload;
+        nodes.set(payload.split(' ')[0].replace('id=', ''), payload);
+      }
+      if (evt.type === 'graph:edge_added') {
+        edges.push(evt.payload);
+      }
+    });
+
+    if (nodes.size === 0 && edges.length === 0) {
+      container.innerHTML = '<div class="empty-state">Run <code>kdc_scrape_website_to_graph</code> to populate.</div>';
+      return;
+    }
+
+    let html = '';
+    nodes.forEach((info, id) => {
+      const nodeClass = info.includes('social_post') ? 'social_post' : info.includes('social_profile') ? 'social_profile' : 'webpage';
+      html += `<span class="graph-node ${nodeClass}" data-info="Node: ${id}&#10;Attributes: ${info.replace('id=','')}">${id}</span> `;
+    });
+
+    html += '<hr style="border-color:var(--border);margin:8px 0">';
+    edges.forEach(edge => {
+      html += `<div class="edge-line" data-info="Edge: ${edge}&#10;A directed relationship in the knowledge graph">${edge}</div>`;
+    });
+
+    container.innerHTML = html;
+  }
+
+  function feedNext() {
+    if (paused || demoIdx >= demoTimeline.length) {
+      if (demoIdx >= demoTimeline.length) clearInterval(autoFeed);
+      return;
+    }
+    demoIdx++;
+    const events = demoTimeline.slice(0, demoIdx);
+    renderEvents(events);
+    renderGraph(events);
+  }
+
+  document.getElementById('btn-refresh').addEventListener('click', () => {
+    demoIdx = Math.min(demoIdx + 2, demoTimeline.length);
+    const events = demoTimeline.slice(0, demoIdx);
+    renderEvents(events);
+    renderGraph(events);
+  });
+
+  document.getElementById('btn-clear').addEventListener('click', () => {
+    demoIdx = 0;
+    renderEvents([]);
+    renderGraph([]);
+    document.getElementById('stat-nodes').textContent = '0';
+    document.getElementById('stat-edges').textContent = '0';
+  });
+
+  document.getElementById('btn-pause').addEventListener('click', function() {
+    paused = !paused;
+    this.textContent = paused ? 'Resume' : 'Pause';
+  });
+
+  // Auto-feed demo timeline every 600ms
+  autoFeed = setInterval(feedNext, 600);
+
+  // Update stat cards when graph renders
+  const origRenderGraph = renderGraph;
+  renderGraph = function(events) {
+    origRenderGraph(events);
+    let nodeCount = 0, edgeCount = 0;
+    events.forEach(e => {
+      if (e.type === 'graph:node_added') nodeCount++;
+      if (e.type === 'graph:edge_added') edgeCount++;
+    });
+    document.getElementById('stat-nodes').textContent = nodeCount;
+    document.getElementById('stat-edges').textContent = edgeCount;
+  };
+</script>
+</body>
+</html>

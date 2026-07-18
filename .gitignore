@@ -1,0 +1,29 @@
+# Build artifacts
+.build/
+dist/
+DerivedData/
+*.app
+*.zip
+
+# Dependencies
+.venv/
+__pycache__/
+*.egg-info/
+
+# macOS
+.DS_Store
+.DS_Store?
+
+# IDE
+.vscode/
+.idea/
+
+# Python cache
+.ruff_cache/
+
+# Secrets
+.env
+*.pem
+
+# User data
+*.ips
