@@ -17,6 +17,17 @@ final class AppModel: ObservableObject {
     @Published var isScraping = false
     @Published var lastScrapeResult: ProfileScrapeResult?
 
+    @Published var showMissionControl = false
+
+    // ── Mission control clutter filters ──────────────────────────────
+    @Published var filterNav: Bool = true
+    @Published var filterFooter: Bool = true
+    @Published var filterScripts: Bool = true
+    @Published var filterStyles: Bool = true
+    @Published var filterNonHTML: Bool = true
+    @Published var maxPageBytes: Int = 0
+    @Published var respectRobotsTxt: Bool = true
+
     private var crawlTask: Task<Void, Never>?
     private var scrapeTask: Task<Void, Never>?
 
@@ -117,6 +128,12 @@ final class AppModel: ObservableObject {
         )
         var cfg = CrawlConfiguration(depth: depth)
         cfg.sameDomainOnly = sameDomainOnly
+        cfg.maxPageBytes = maxPageBytes
+        cfg.respectRobots = respectRobotsTxt
+        cfg.filterNav = filterNav
+        cfg.filterFooter = filterFooter
+        cfg.filterScripts = filterScripts
+        cfg.filterStyles = filterStyles
 
         crawlTask = Task { [weak self] in
             defer { Task { @MainActor [weak self] in self?.finishCrawl() } }
@@ -217,6 +234,24 @@ final class AppModel: ObservableObject {
         let title = graphManager.graphs.first(where: { $0.id == graphManager.activeGraphID })?.title ?? "knowledge compiler"
         let window = FloatingReaderWindow(node: node, graphTitle: title)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    // MARK: - Tree graph window
+
+    private var treeWindow: TreeGraphWindow?
+
+    func openTreeGraph() {
+        if let existing = treeWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            return
+        }
+        let window = TreeGraphWindow(model: self)
+        window.setCloseHandler { [weak self] in
+            self?.treeWindow = nil
+        }
+        treeWindow = window
+        window.makeKeyAndOrderFront(nil)
+        log.post(.info, "tree", "3D knowledge tree opened")
     }
 
     // MARK: - Obsidian export

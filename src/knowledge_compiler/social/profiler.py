@@ -99,6 +99,7 @@ class SocialProfiler:
             "social:compile_start",
             "SocialProfiler",
             {"handle": clean_handle, "platform": platform},
+            version="v2",
         )
 
         profile_node_id = f"profile_{platform}_{clean_handle}"
@@ -137,12 +138,15 @@ class SocialProfiler:
                 relation="declared_idea",
             )
 
+        self._graph.flush()
+
         dossier["post_count"] = len(dossier["core_teachings"])
 
         self._event_bus.emit(
             "social:compile_complete",
             "SocialProfiler",
             {"handle": clean_handle, "post_count": dossier["post_count"]},
+            version="v2",
         )
 
         return dossier

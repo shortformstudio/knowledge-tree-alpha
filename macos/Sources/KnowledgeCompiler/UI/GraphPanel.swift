@@ -105,9 +105,10 @@ private struct RingViz: View {
                 }
 
                 let sweepAngle = Angle.degrees((t * 24).truncatingRemainder(dividingBy: 360))
+                let rads = CGFloat(sweepAngle.radians)
                 let sweepEnd = CGPoint(
-                    x: center.x + cos(sweepAngle.radians) * maxRadius,
-                    y: center.y + sin(sweepAngle.radians) * maxRadius
+                    x: center.x + cos(rads) * maxRadius,
+                    y: center.y + sin(rads) * maxRadius
                 )
                 var sweep = Path()
                 sweep.move(to: center)

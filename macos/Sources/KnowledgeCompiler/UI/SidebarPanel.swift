@@ -67,8 +67,71 @@ struct SidebarPanel: View {
                 }
                 .padding(10)
             }
+
+            // ── Toolbar buttons ──────────────────────────────────────────
+            Divider()
+                .overlay(Theme.panelBorder)
+
+            VStack(spacing: 2) {
+                SidebarToolButton(
+                    icon: "tree",
+                    label: "tree graph",
+                    help: "Open the 3D knowledge tree in a floating window",
+                    action: { model.openTreeGraph() }
+                )
+                SidebarToolButton(
+                    icon: "point.3.connected.trianglepath.dotted",
+                    label: "obsidian graph",
+                    help: "Export the compiled dataset to an Obsidian vault with Mermaid graph",
+                    action: { model.exportToObsidian() }
+                )
+                SidebarToolButton(
+                    icon: "line.3.horizontal.decrease",
+                    label: "mission control",
+                    help: "Toggle clutter filters and parsing options",
+                    action: { model.showMissionControl.toggle() }
+                )
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 6)
         }
         .frame(width: 220)
+    }
+}
+
+// MARK: - Sidebar tool button
+
+private struct SidebarToolButton: View {
+    let icon: String
+    let label: String
+    let help: String
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 18)
+                Text(label)
+                    .font(Theme.body(11))
+                Spacer()
+            }
+            .foregroundStyle(isHovering ? Theme.cyan : Theme.textSecondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(isHovering ? Theme.cyan.opacity(0.1) : .clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .onHover { inside in
+            isHovering = inside
+        }
     }
 }
 

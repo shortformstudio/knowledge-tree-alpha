@@ -7,12 +7,27 @@ struct ParsedPage: Sendable {
 }
 
 struct HTMLParser: Sendable {
-    private static let strippedBlocks = ["script", "style", "nav", "footer", "header", "noscript", "svg"]
+    private let strippedBlocks: [String]
+
+    init(
+        filterNav: Bool = true,
+        filterFooter: Bool = true,
+        filterScripts: Bool = true,
+        filterStyles: Bool = true
+    ) {
+        var blocks: [String] = ["noscript", "svg"]
+        if filterScripts { blocks.append("script") }
+        if filterStyles { blocks.append("style") }
+        if filterNav { blocks.append("nav") }
+        if filterFooter { blocks.append("footer") }
+        blocks.append("header")
+        self.strippedBlocks = blocks
+    }
 
     func rawText(from html: String) -> String {
         var cleaned = html
         cleaned = replace(in: cleaned, pattern: "<!--.*?-->", with: " ")
-        for tag in Self.strippedBlocks {
+        for tag in strippedBlocks {
             cleaned = replace(in: cleaned, pattern: "<\(tag)\\b[^>]*>.*?</\(tag)>", with: " ")
         }
         var text = replace(in: cleaned, pattern: "<[^>]+>", with: " ")
@@ -31,7 +46,7 @@ struct HTMLParser: Sendable {
 
         var cleaned = html
         cleaned = replace(in: cleaned, pattern: "<!--.*?-->", with: " ")
-        for tag in Self.strippedBlocks {
+        for tag in strippedBlocks {
             cleaned = replace(in: cleaned, pattern: "<\(tag)\\b[^>]*>.*?</\(tag)>", with: " ")
         }
 

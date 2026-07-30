@@ -90,6 +90,7 @@ class SemanticCompiler:
                 "sentences": len(sentences),
                 "triplets": len(triplets),
             },
+            version="v2",
         )
 
         return triplets

@@ -6,6 +6,7 @@ Formal guarantee
   E = unique edges discovered, within the depth-bounded induced subgraph.
 - The state DAG (depth-ordered queue) ensures no node is visited twice
   and that depth strictly increases along every path.
+- Pending nodes are flushed to SQLite in a single batch at crawl completion.
 """
 
 from __future__ import annotations
@@ -65,10 +66,7 @@ class Crawler:
     # ------------------------------------------------------------------
 
     async def crawl(self, start_url: str) -> tuple[int, int]:
-        """Execute a BFS crawl from *start_url* and return (nodes, edges).
-
-        The crawl respects ``self._max_depth`` and never revisits a URL.
-        """
+        """Execute a BFS crawl from *start_url* and return (nodes, edges)."""
         visited: set[str] = set()
         queue: list[tuple[str, int]] = [(start_url, 0)]
 
@@ -76,6 +74,7 @@ class Crawler:
             "crawl:start",
             "Crawler",
             {"url": start_url, "max_depth": self._max_depth},
+            version="v2",
         )
 
         while queue:
@@ -92,6 +91,7 @@ class Crawler:
                     "crawl:skip",
                     "Crawler",
                     {"url": current_url, "reason": "fetch_failed"},
+                    version="v2",
                 )
                 continue
 
@@ -109,6 +109,7 @@ class Crawler:
                 "crawl:node_visited",
                 "Crawler",
                 {"url": current_url, "depth": depth, "chars": len(truncated)},
+                version="v2",
             )
 
             if depth < self._max_depth:
@@ -121,10 +122,13 @@ class Crawler:
                     if link not in visited:
                         queue.append((link, depth + 1))
 
+        self._graph.flush()
+
         self._event_bus.emit(
             "crawl:complete",
             "Crawler",
             {"nodes": self._graph.node_count, "edges": self._graph.edge_count},
+            version="v2",
         )
 
         return self._graph.node_count, self._graph.edge_count

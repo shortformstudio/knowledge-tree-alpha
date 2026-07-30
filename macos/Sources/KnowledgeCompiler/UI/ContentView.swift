@@ -20,30 +20,9 @@ struct ContentView: View {
         size: CGSize(width: 480, height: 520)
     )
 
-    private var showForest: Bool {
-        guard let g = model.activeGraph else { return true }
-        return g.nodeCount == 0
-    }
-
     var body: some View {
         ZStack(alignment: .topLeading) {
             FabricBackground()
-
-            CylinderVisualizer(
-                graph: model.activeGraph ?? GraphStore(),
-                onSelectNode: { nodeID in
-                    model.selectNode(id: nodeID)
-                    if let node = model.selectedNode {
-                        model.openFloatingReader(for: node)
-                    }
-                },
-                forestTrees: model.forestTreeEntries,
-                forestMode: showForest,
-                onSelectForestTree: { id in
-                    model.activateGraph(id: id)
-                }
-            )
-            .ignoresSafeArea()
 
             TopBar(model: model)
 
@@ -77,7 +56,7 @@ struct ContentView: View {
             }
         }
         .coordinateSpace(name: "canvas")
-        .frame(minWidth: 1100, minHeight: 780)
+        .frame(minWidth: 900, minHeight: 620)
         .preferredColorScheme(.dark)
         .animation(.timingCurve(0.25, 0.8, 0.25, 1, duration: 0.3), value: model.selectedNodeID)
     }

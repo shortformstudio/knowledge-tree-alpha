@@ -77,6 +77,14 @@ class SocialInput(BaseModel):
     def _clean_handle(cls, v: str) -> str:
         return v.strip().lstrip("@")
 
+    @field_validator("platform")
+    @classmethod
+    def _validate_platform(cls, v: str) -> str:
+        valid = {"twitter", "x", "github", "reddit"}
+        if v.lower() not in valid:
+            raise ValueError(f"Unsupported platform: {v}. Valid: {', '.join(sorted(valid))}")
+        return v.lower()
+
 
 class QueryInput(BaseModel):
     """Input model for ``kdc_query_knowledge_graph``."""
@@ -97,7 +105,7 @@ class QueryInput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Lifespan: build the DI container once at server start
+# Lifespan: build the DI container once at server start, tear down gracefully
 # ---------------------------------------------------------------------------
 
 _container: Container | None = None
@@ -118,7 +126,7 @@ async def _lifespan(server: FastMCP) -> Any:  # noqa: ARG001
     _container = Container(config=config)
     yield {"config": config, "container": _container}
     if _container is not None:
-        _container.graph.close()
+        await _container.ashutdown()
 
 
 # ---------------------------------------------------------------------------

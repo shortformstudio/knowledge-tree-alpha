@@ -64,6 +64,21 @@ class CompilerConfig(BaseSettings):
         description="Filesystem path for SQLite-backed graph persistence; in-memory when unset",
     )
 
+    graph_max_nodes: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Hard ceiling on in-memory graph nodes; "
+            "oldest evicted when exceeded. None = unbounded."
+        ),
+    )
+
+    graph_node_ttl_seconds: float | None = Field(
+        default=None,
+        ge=10.0,
+        description="Maximum node age in seconds before eviction. None = no time-based eviction.",
+    )
+
     max_content_chars: int = Field(
         default=3000,
         ge=500,
@@ -81,6 +96,12 @@ class CompilerConfig(BaseSettings):
     telemetry_enabled: bool = Field(
         default=True,
         description="Enable the observable event bus for connective dynamics tracing",
+    )
+
+    memory_payload_streaming_threshold_bytes: int = Field(
+        default=1_048_576,  # 1 MB
+        ge=1024,
+        description="Payload size threshold (bytes) above which streaming/pagination is mandatory",
     )
 
     @field_validator("graph_db_path")

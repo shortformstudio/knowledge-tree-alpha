@@ -1,7 +1,9 @@
-"""Async HTTP fetcher with domain-aware rate limiting.
+"""Async HTTP fetcher with connection pooling and domain-aware rate limiting.
 
 Guarantees
 ----------
+- A single shared ``httpx.AsyncClient`` reuses TCP connections (HTTP/2
+  multiplexing) across all requests during the fetcher's lifetime.
 - Concurrent requests capped by an asyncio Semaphore (O(1) acquisition).
 - Per-domain minimum inter-request interval via a lock-backed dictionary,
   bounding the request rate at the configured ``rate_limit_rps``.
@@ -21,7 +23,7 @@ from ..telemetry import EventBus
 
 
 class Fetcher:
-    """Rate-limited asynchronous HTTP fetcher.
+    """Rate-limited asynchronous HTTP fetcher with connection pooling.
 
     Parameters
     ----------
@@ -45,6 +47,7 @@ class Fetcher:
         "_last_request",
         "_lock",
         "_event_bus",
+        "_client",
     )
 
     def __init__(
@@ -62,29 +65,41 @@ class Fetcher:
         self._last_request: dict[str, float] = {}
         self._lock = asyncio.Lock()
         self._event_bus = event_bus
+        self._client: httpx.AsyncClient | None = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     async def fetch(self, url: str) -> str | None:
-        """Fetch *url* and return its HTML body, or ``None`` on failure.
-
-        Automatically waits for the per-domain rate window before
-        issuing the request.
-        """
+        """Fetch *url* and return its HTML body, or ``None`` on failure."""
         domain = urlparse(url).netloc
         await self._throttle(domain)
 
         async with self._semaphore:
             return await self._request(url)
 
+    async def close(self) -> None:
+        """Close the shared HTTP client, releasing pooled connections."""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
+    async def _client_instance(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                headers={"User-Agent": self._user_agent},
+                timeout=httpx.Timeout(self._timeout),
+                follow_redirects=True,
+                http2=True,
+            )
+        return self._client
+
     async def _throttle(self, domain: str) -> None:
-        """Enforce the per-domain minimum interval."""
         if self._rate_interval <= 0:
             return
 
@@ -98,35 +113,33 @@ class Fetcher:
             self._last_request[domain] = now
 
     async def _request(self, url: str) -> str | None:
-        self._event_bus.emit("fetch:start", "Fetcher", {"url": url})
+        self._event_bus.emit("fetch:start", "Fetcher", {"url": url}, version="v2")
         try:
-            async with httpx.AsyncClient(
-                headers={"User-Agent": self._user_agent},
-                timeout=httpx.Timeout(self._timeout),
-                follow_redirects=True,
-                http2=True,
-            ) as client:
-                response = await client.get(url)
-                if response.status_code == 200:
-                    self._event_bus.emit(
-                        "fetch:success",
-                        "Fetcher",
-                        {"url": url, "bytes": len(response.content)},
-                    )
-                    return response.text
+            client = await self._client_instance()
+            response = await client.get(url)
+            if response.status_code == 200:
                 self._event_bus.emit(
-                    "fetch:error",
+                    "fetch:success",
                     "Fetcher",
-                    {"url": url, "status": response.status_code},
+                    {"url": url, "bytes": len(response.content)},
+                    version="v2",
                 )
-                return None
+                return response.text
+            self._event_bus.emit(
+                "fetch:error",
+                "Fetcher",
+                {"url": url, "status": response.status_code},
+                version="v2",
+            )
+            return None
         except httpx.TimeoutException:
-            self._event_bus.emit("fetch:timeout", "Fetcher", {"url": url})
+            self._event_bus.emit("fetch:timeout", "Fetcher", {"url": url}, version="v2")
             return None
         except Exception as exc:
             self._event_bus.emit(
                 "fetch:error",
                 "Fetcher",
                 {"url": url, "error": type(exc).__name__},
+                version="v2",
             )
             return None

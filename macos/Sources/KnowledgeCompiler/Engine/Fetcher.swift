@@ -1,5 +1,74 @@
 import Foundation
 
+// MARK: - Robots.txt checker (standard scraping methodology)
+
+enum RobotsTxtChecker {
+    private static var cache: [String: Set<String>] = [:]
+    private static var cacheTime: [String: Date] = [:]
+    private static let cacheTTL: TimeInterval = 300
+
+    static func isAllowed(url: URL, userAgent: String = "*") async -> Bool {
+        guard let host = url.host?.lowercased() else { return true }
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return true }
+
+        if let cached = cache[host], let ts = cacheTime[host], Date().timeIntervalSince(ts) < cacheTTL {
+            return cached.contains(url.path) || cached.contains("*")
+        }
+
+        guard let robotsURL = URL(string: "\(scheme)://\(host)/robots.txt") else { return true }
+
+        do {
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = 5
+            let session = URLSession(configuration: config)
+            let (data, response) = try await session.data(from: robotsURL)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return true }
+
+            let text = String(data: data, encoding: .utf8) ?? ""
+            let disallowed = parseRobotsTxt(text, forUserAgent: userAgent)
+            cache[host] = disallowed
+            cacheTime[host] = Date()
+            return !disallowed.contains(url.path) && !disallowed.contains("*")
+        } catch {
+            return true
+        }
+    }
+
+    private static func parseRobotsTxt(_ text: String, forUserAgent targetAgent: String) -> Set<String> {
+        var currentAgent = "*"
+        var disallowed: Set<String> = []
+        var inRelevantBlock = true
+
+        for line in text.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
+
+            let parts = trimmed.components(separatedBy: ":")
+            guard parts.count >= 2 else { continue }
+            let key = parts[0].trimmingCharacters(in: .whitespaces).lowercased()
+            let value = parts.dropFirst().joined(separator: ":").trimmingCharacters(in: .whitespaces)
+
+            switch key {
+            case "user-agent":
+                currentAgent = value.lowercased()
+                inRelevantBlock = (currentAgent == targetAgent.lowercased() || currentAgent == "*")
+            case "disallow" where inRelevantBlock:
+                if value.isEmpty {
+                    disallowed = []
+                } else {
+                    disallowed.insert(value)
+                }
+            default:
+                break
+            }
+        }
+
+        return disallowed
+    }
+}
+
+// MARK: - Errors
+
 enum FetchError: Error, CustomStringConvertible {
     case invalidURL(String)
     case unsupportedScheme(String)
@@ -8,6 +77,7 @@ enum FetchError: Error, CustomStringConvertible {
     case tooLarge(Int, URL)
     case timeout(URL)
     case transport(String, URL)
+    case robotsDisallowed(URL)
 
     var description: String {
         switch self {
@@ -18,15 +88,20 @@ enum FetchError: Error, CustomStringConvertible {
         case .tooLarge(let bytes, let url): return "page too large (\(bytes) bytes) — \(url.absoluteString)"
         case .timeout(let url): return "timeout — \(url.absoluteString)"
         case .transport(let reason, let url): return "transport failure: \(reason) — \(url.absoluteString)"
+        case .robotsDisallowed(let url): return "robots.txt disallowed — \(url.absoluteString)"
         }
     }
 }
+
+// MARK: - Fetch result
 
 struct FetchResult: Sendable {
     let html: String
     let finalURL: URL
     let bytes: Int
 }
+
+// MARK: - Fetcher
 
 actor Fetcher {
     private let session: URLSession
@@ -35,26 +110,33 @@ actor Fetcher {
     private let maxBytes: Int
     private let maxRetries: Int
     private let log: LogSink
+    private let respectRobots: Bool
 
     private var lastRequest: [String: Date] = [:]
 
     init(
-        userAgent: String = "knowledge-compiler/1.0 (+research; contact: local)",
-        timeout: TimeInterval = 15,
-        minInterval: TimeInterval = 0.4,
-        maxBytes: Int = 3_000_000,
+        userAgent: String = "KnowledgeCompiler/1.0 (research crawler; +https://github.com/shortformstudio/knowledge-compiler)",
+        timeout: TimeInterval = 30,
+        minInterval: TimeInterval = 0.2,
+        maxBytes: Int = Int.max,
         maxRetries: Int = 2,
+        respectRobots: Bool = true,
         log: LogSink
     ) {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = timeout
         config.timeoutIntervalForResource = timeout * 2
-        config.httpAdditionalHeaders = ["User-Agent": userAgent, "Accept": "text/html,application/xhtml+xml"]
+        config.httpAdditionalHeaders = [
+            "User-Agent": userAgent,
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "en-US,en;q=0.9",
+        ]
         self.session = URLSession(configuration: config)
         self.userAgent = userAgent
         self.minInterval = minInterval
         self.maxBytes = maxBytes
         self.maxRetries = maxRetries
+        self.respectRobots = respectRobots
         self.log = log
     }
 
@@ -62,6 +144,15 @@ actor Fetcher {
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
             throw FetchError.unsupportedScheme(url.scheme ?? "none")
         }
+
+        if respectRobots {
+            let allowed = await RobotsTxtChecker.isAllowed(url: url, userAgent: userAgent)
+            if !allowed {
+                log.emit(.warn, "fetcher", "robots.txt disallowed — \(url.absoluteString)")
+                throw FetchError.robotsDisallowed(url)
+            }
+        }
+
         try await throttle(host: url.host ?? "")
 
         var attempt = 0
@@ -110,7 +201,7 @@ actor Fetcher {
            !contentType.contains("application/xhtml") {
             throw FetchError.notHTML(contentType, url)
         }
-        guard data.count <= maxBytes else {
+        if maxBytes < Int.max, data.count > maxBytes {
             throw FetchError.tooLarge(data.count, url)
         }
 

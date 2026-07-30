@@ -12,20 +12,24 @@ struct CrawlSummary: Sendable {
 struct CrawlConfiguration: Sendable {
     var depth: Int
     var sameDomainOnly: Bool = true
-    var maxPages: Int = 80
-    var maxConcurrent: Int = 4
-    var maxLinksPerPage: Int = 40
-    var maxExcerptChars: Int = 4000
-    var maxRawChars: Int = 120_000
+    var maxPages: Int = Int.max
+    var maxConcurrent: Int = 8
+    var maxLinksPerPage: Int = Int.max
+    var maxExcerptChars: Int = Int.max
+    var maxRawChars: Int = Int.max
+    var maxPageBytes: Int = Int.max
+    var respectRobots: Bool = true
+    var filterNav: Bool = true
+    var filterFooter: Bool = true
+    var filterScripts: Bool = true
+    var filterStyles: Bool = true
 
     init(depth: Int) {
-        self.depth = min(max(depth, 1), 3)
+        self.depth = max(depth, 1)
     }
 }
 
 final class Crawler: Sendable {
-    private let fetcher: Fetcher
-    private let parser = HTMLParser()
     private let log: LogSink
     private let onNode: @Sendable (PageNode) -> Void
     private let onEdge: @Sendable (String, String) -> Void
@@ -36,12 +40,22 @@ final class Crawler: Sendable {
         onEdge: @escaping @Sendable (String, String) -> Void
     ) {
         self.log = log
-        self.fetcher = Fetcher(log: log)
         self.onNode = onNode
         self.onEdge = onEdge
     }
 
     func crawl(start: String, config: CrawlConfiguration) async throws -> CrawlSummary {
+        let fetcher = Fetcher(
+            maxBytes: config.maxPageBytes,
+            respectRobots: config.respectRobots,
+            log: log
+        )
+        let parser = HTMLParser(
+            filterNav: config.filterNav,
+            filterFooter: config.filterFooter,
+            filterScripts: config.filterScripts,
+            filterStyles: config.filterStyles
+        )
         guard let startURL = normalize(start) else {
             log.emit(.error, "crawler", FetchError.invalidURL(start).description)
             throw FetchError.invalidURL(start)
@@ -65,7 +79,7 @@ final class Crawler: Sendable {
 
             log.emit(.info, "crawler", "depth \(depth): fetching \(level.count) page\(level.count == 1 ? "" : "s")")
 
-            let results = await fetchLevel(Array(level), depth: depth, config: config)
+            let results = await fetchLevel(Array(level), depth: depth, config: config, fetcher: fetcher, parser: parser)
 
             for result in results {
                 try Task.checkCancellation()
@@ -139,13 +153,13 @@ final class Crawler: Sendable {
         let outcome: Result<(ParsedPage, URL, String), FetchError>
     }
 
-    private func fetchLevel(_ urls: [URL], depth: Int, config: CrawlConfiguration) async -> [LevelResult] {
+    private func fetchLevel(_ urls: [URL], depth: Int, config: CrawlConfiguration, fetcher: Fetcher, parser: HTMLParser) async -> [LevelResult] {
         await withTaskGroup(of: LevelResult.self) { group in
             var iterator = urls.makeIterator()
             var inFlight = 0
 
             func enqueue(_ url: URL) {
-                group.addTask { [fetcher, parser, config] in
+                group.addTask { [config] in
                     do {
                         let fetched = try await fetcher.fetch(url)
                         let page = parser.extract(

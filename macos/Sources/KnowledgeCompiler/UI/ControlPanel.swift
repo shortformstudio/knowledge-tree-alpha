@@ -24,7 +24,7 @@ struct ControlPanel: View {
                 Text("links deep")
                     .font(Theme.body(12))
                     .foregroundStyle(Theme.textSecondary)
-                ForEach(1...3, id: \.self) { d in
+                ForEach(1...5, id: \.self) { d in
                     Button("\(d)") { model.depth = d }
                         .buttonStyle(StitchedButtonStyle(prominent: false, active: model.depth == d))
                         .disabled(model.isCrawling)
@@ -41,6 +41,54 @@ struct ControlPanel: View {
                 .disabled(model.isCrawling)
             }
 
+            // ── Mission control: clutter filters ──────────────────────────
+            if model.showMissionControl {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("clutter filters")
+                        .font(Theme.body(9))
+                        .foregroundStyle(Theme.textSecondary.opacity(0.7))
+                        .textCase(.uppercase)
+
+                    HStack(spacing: 16) {
+                        FilterToggle(label: "nav", isOn: $model.filterNav)
+                        FilterToggle(label: "footer", isOn: $model.filterFooter)
+                        FilterToggle(label: "scripts", isOn: $model.filterScripts)
+                        FilterToggle(label: "styles", isOn: $model.filterStyles)
+                    }
+
+                    HStack(spacing: 16) {
+                        Toggle(isOn: $model.filterNonHTML) {
+                            Text("skip non-HTML")
+                                .font(Theme.body(11))
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .tint(Theme.teal)
+
+                        Toggle(isOn: $model.respectRobotsTxt) {
+                            Text("robots.txt")
+                                .font(Theme.body(11))
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                        .toggleStyle(.switch)
+                        .controlSize(.mini)
+                        .tint(Theme.teal)
+                    }
+
+                    HStack(spacing: 6) {
+                        Text("max page size:")
+                            .font(Theme.body(11))
+                            .foregroundStyle(Theme.textSecondary)
+                        Text(model.maxPageBytes == 0 ? "unlimited" : "\(model.maxPageBytes / 1_000_000) MB")
+                            .font(Theme.mono(11))
+                            .foregroundStyle(Theme.cyan)
+                    }
+                }
+                .padding(.top, 2)
+            }
+
+            // ── Crawl controls ──────────────────────────────────────────
             HStack(spacing: 12) {
                 if model.isCrawling {
                     Button {
@@ -61,9 +109,21 @@ struct ControlPanel: View {
                     }
                     .buttonStyle(StitchedButtonStyle(prominent: true))
                 }
+
+                Button {
+                    model.showMissionControl.toggle()
+                } label: {
+                    Image(systemName: "line.3.horizontal.decrease")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(model.showMissionControl ? Theme.cyan : Theme.textSecondary)
+                .help("Toggle mission control clutter filters")
+
                 Spacer()
             }
 
+            // ── Stats ────────────────────────────────────────────────────
             HStack(spacing: 10) {
                 StatChip(label: "pages", value: "\(model.activeGraph?.nodeCount ?? 0)")
                 StatChip(label: "edges", value: "\(model.activeGraph?.edgeCount ?? 0)", tint: Theme.aqua)
@@ -79,5 +139,23 @@ struct ControlPanel: View {
         }
         .padding(14)
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Filter toggle
+
+private struct FilterToggle: View {
+    let label: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            Text(label)
+                .font(Theme.body(11))
+                .foregroundStyle(Theme.textSecondary)
+        }
+        .toggleStyle(.switch)
+        .controlSize(.mini)
+        .tint(Theme.teal)
     }
 }
