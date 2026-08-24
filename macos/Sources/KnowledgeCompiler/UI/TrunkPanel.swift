@@ -30,10 +30,16 @@ final class TrunkBridge: NSObject, ObservableObject, WKScriptMessageHandler, WKN
         case "log":
             let level = LogLevel(rawValue: body["level"] as? String ?? "info") ?? .info
             log?.post(level, "trunk", body["message"] as? String ?? "")
+        case "forestToggle":
+            if let mode = body["mode"] as? Bool {
+                onForestToggle?(mode)
+            }
         default:
             break
         }
     }
+
+    var onForestToggle: ((Bool) -> Void)?
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         log?.post(.error, "trunk", "renderer failed to load: \(error.localizedDescription)")
@@ -81,6 +87,42 @@ final class TrunkBridge: NSObject, ObservableObject, WKScriptMessageHandler, WKN
         }
     }
 
+    func pushForest(_ trees: [ForestTreeEntry]) {
+        struct ForestTree: Encodable {
+            let id: String
+            let title: String
+            let nodeCount: Int
+            let edgeCount: Int
+            let species: String
+        }
+        struct ForestData: Encodable {
+            let trees: [ForestTree]
+        }
+        let data = ForestData(
+            trees: trees.map { tree in
+                ForestTree(
+                    id: tree.id.uuidString,
+                    title: tree.title,
+                    nodeCount: tree.nodeCount,
+                    edgeCount: tree.edgeCount,
+                    species: String(describing: tree.species).lowercased()
+                )
+            }
+        )
+        guard let jsonData = try? JSONEncoder().encode(data),
+              let json = String(data: jsonData, encoding: .utf8) else {
+            log?.post(.error, "trunk", "forest serialisation failed")
+            return
+        }
+        if ready {
+            webView?.evaluateJavaScript("window.setForest && window.setForest(\(json));") { [weak self] _, error in
+                if let error {
+                    self?.log?.post(.error, "trunk", "forest injection failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
     private func inject(_ json: String) {
         webView?.evaluateJavaScript("window.setGraph && window.setGraph(\(json));") { [weak self] _, error in
             if let error {
@@ -118,6 +160,7 @@ struct TrunkPanel: View {
     @ObservedObject var model: AppModel
     @StateObject private var bridge = TrunkBridge()
     @State private var pushTask: Task<Void, Never>?
+    var onForestToggle: ((Bool) -> Void)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -153,11 +196,21 @@ struct TrunkPanel: View {
         .onAppear {
             bridge.log = model.log
             bridge.onOpenNode = { id in model.selectNode(id: id) }
+            bridge.onForestToggle = { isForest in
+                onForestToggle?(isForest)
+            }
             schedulePush()
+            if let graph = model.activeGraph {
+                bridge.pushForest(model.forestTreeEntries)
+            }
         }
         .onChange(of: model.activeGraph?.nodes.count ?? 0) { _, _ in schedulePush() }
         .onChange(of: model.isCrawling) { _, _ in
             if !model.isCrawling { schedulePush(delay: 0.1) }
+        }
+        .onChange(of: model.forestTreeEntries.count) { _, _ in
+            guard let graph = model.activeGraph else { return }
+            bridge.pushForest(model.forestTreeEntries)
         }
     }
 

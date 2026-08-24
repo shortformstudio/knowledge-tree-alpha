@@ -42,21 +42,10 @@ struct TreeGraphContent: View {
 
     var body: some View {
         ZStack {
-            CylinderVisualizer(
-                graph: graph,
-                onSelectNode: { nodeID in
-                    model.selectNode(id: nodeID)
-                    if let node = model.selectedNode {
-                        model.openFloatingReader(for: node)
-                    }
-                },
-                forestTrees: model.forestTreeEntries,
-                forestMode: showForest,
-                onSelectForestTree: { id in
-                    model.activateGraph(id: id)
-                }
-            )
-            .ignoresSafeArea()
+            TrunkPanel(model: model, onForestToggle: { isForest in
+                showForest = isForest
+            })
+                .ignoresSafeArea()
 
             VStack {
                 HStack {

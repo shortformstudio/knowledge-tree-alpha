@@ -17,13 +17,13 @@
   #gateway {
     position: absolute;
     pointer-events: none;
-    max-width: 250px;
-    padding: 9px 12px;
-    background: rgba(6, 32, 32, 0.82);
-    -webkit-backdrop-filter: blur(14px);
-    border: 1px solid rgba(0, 240, 255, 0.18);
-    border-radius: 10px;
-    box-shadow: 0 8px 28px rgba(0,0,0,0.5), 0 0 18px rgba(0,240,255,0.10);
+    max-width: 280px;
+    padding: 10px 14px;
+    background: rgba(4, 28, 28, 0.92);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid rgba(0, 240, 255, 0.22);
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.6), 0 0 24px rgba(0,240,255,0.12);
     color: var(--text-primary);
     opacity: 0;
     transition: opacity 0.22s cubic-bezier(0.25,0.8,0.25,1);
@@ -31,36 +31,49 @@
   }
   #gateway::after {
     content: '';
-    position: absolute; inset: 4px;
-    border: 1px dashed rgba(0, 240, 255, 0.16);
-    border-radius: 7px;
+    position: absolute; inset: 5px;
+    border: 1px dashed rgba(0, 240, 255, 0.18);
+    border-radius: 8px;
   }
   #gateway .g-label {
-    font-size: 8px; letter-spacing: 1.5px; color: var(--accent-cyan);
-    text-shadow: 0 0 8px rgba(77,255,210,0.5); margin-bottom: 3px;
+    font-size: 7px; letter-spacing: 1.8px; color: var(--accent-cyan);
+    text-shadow: 0 0 10px rgba(77,255,210,0.6); margin-bottom: 4px;
   }
-  #gateway .g-title { font-size: 13px; font-weight: 400; line-height: 1.25; }
-  #gateway .g-meta { font-size: 9px; color: var(--text-secondary); margin-top: 4px; font-family: ui-monospace, monospace; }
+  #gateway .g-title { font-size: 14px; font-weight: 400; line-height: 1.3; }
+  #gateway .g-meta { font-size: 9px; color: var(--text-secondary); margin-top: 5px; font-family: ui-monospace, monospace; }
   #empty {
     position: absolute; inset: 0;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    color: var(--text-secondary); gap: 4px; pointer-events: none;
+    color: var(--text-secondary); gap: 5px; pointer-events: none;
     transition: opacity 0.4s;
   }
-  #empty .e-big { font-size: 17px; font-weight: 100; opacity: 0.85; }
+  #empty .e-big { font-size: 18px; font-weight: 100; opacity: 0.85; }
   #empty .e-small { font-size: 10px; opacity: 0.5; }
   #altitude {
-    position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
-    display: flex; flex-direction: column; align-items: center; gap: 6px;
-    pointer-events: none; opacity: 0.55;
+    position: absolute; right: 14px; top: 50%; transform: translateY(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    pointer-events: none; opacity: 0.5;
   }
-  #altitude .a-track { width: 1px; height: 110px; background: rgba(0,240,255,0.18); position: relative; }
+  #altitude .a-track { width: 1.5px; height: 140px; background: rgba(0,240,255,0.2); position: relative; }
   #altitude .a-dot {
-    position: absolute; left: -2.5px; width: 6px; height: 6px; border-radius: 50%;
-    background: var(--accent-cyan); box-shadow: 0 0 8px rgba(77,255,210,0.8);
+    position: absolute; left: -3px; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent-cyan); box-shadow: 0 0 12px rgba(77,255,210,0.9);
     transition: top 0.15s linear;
   }
-  #altitude .a-label { font-size: 8px; color: var(--text-secondary); letter-spacing: 1px; writing-mode: vertical-rl; }
+  #altitude .a-label { font-size: 7px; color: var(--text-secondary); letter-spacing: 1.2px; writing-mode: vertical-rl; }
+  #forest-toggle {
+    position: absolute; left: 14px; bottom: 14px; z-index: 20;
+    padding: 8px 14px;
+    background: rgba(4, 28, 28, 0.85);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(0, 240, 255, 0.18);
+    border-radius: 8px;
+    color: var(--accent-cyan);
+    font-family: inherit; font-size: 11px; font-weight: 400; letter-spacing: 0.5px;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
+  }
+  #forest-toggle:hover { background: rgba(4, 28, 28, 0.95); border-color: var(--accent-cyan); box-shadow: 0 0 20px rgba(0,240,255,0.15); }
 </style>
 </head>
 <body>
@@ -75,13 +88,13 @@
   <div class="e-small">compile knowledge to grow bark</div>
 </div>
 <div id="altitude">
-  <div class="a-track"><div class="a-dot" style="top:104px"></div></div>
+  <div class="a-track"><div class="a-dot" style="top:134px"></div></div>
   <div class="a-label">ascent</div>
 </div>
+<button id="forest-toggle">show forest</button>
 <script src="three.min.js"></script>
 <script>
 "use strict";
-// PART_CORE
 function post(msg) {
   try { window.webkit.messageHandlers.trunk.postMessage(msg); } catch (e) {}
 }
@@ -89,7 +102,6 @@ window.onerror = function (message, source, line) {
   post({ type: "log", level: "error", message: "trunk model: " + message + " (line " + line + ")" });
 };
 
-// -- deterministic pseudo-noise ------------------------------------------
 function hash2(x, y) {
   const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
   return s - Math.floor(s);
@@ -102,11 +114,11 @@ function vnoise(x, y) {
   const c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
   return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
 }
-function fbm(x, y) {
+function fbm(x, y, octaves = 5, lacunarity = 2.1, gain = 0.52) {
   let total = 0, amp = 0.5, freq = 1;
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < octaves; i++) {
     total += vnoise(x * freq, y * freq) * amp;
-    amp *= 0.5; freq *= 2.03;
+    amp *= gain; freq *= lacunarity;
   }
   return total;
 }
@@ -115,55 +127,59 @@ function strHash(s) {
   for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
   return Math.abs(h);
 }
+const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+const PITCH_PER_NODE = 0.58;
+const K_HELIX = PITCH_PER_NODE / GOLDEN;
+const RADIUS = 1.85;
 
-// -- constants of the helical memory --------------------------------------
-const GOLDEN = Math.PI * (3 - Math.sqrt(5));   // 2.39996... irrational vs 2π: bark never repeats
-const PITCH_PER_NODE = 0.62;                   // vertical rise between successive memories
-const K_HELIX = PITCH_PER_NODE / GOLDEN;       // helical lock: metres of ascent per radian of spin
-const RADIUS = 1.9;
-
-// -- scene -----------------------------------------------------------------
 const stage = document.getElementById("stage");
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setClearColor(0x000000, 0);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
 stage.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 100);
-camera.position.set(0, 0.6, RADIUS * 3.6);
+const camera = new THREE.PerspectiveCamera(36, 1, 0.05, 100);
+camera.position.set(0, 0.35, RADIUS * 3.8);
 camera.lookAt(0, 0, 0);
 
-const keyLight = new THREE.DirectionalLight(0x9ffcf0, 2.4);
-keyLight.position.set(3.5, 4, 5);
+const keyLight = new THREE.DirectionalLight(0x9ffcf0, 2.2);
+keyLight.position.set(3.2, 4.5, 4.8);
 scene.add(keyLight);
-const rimLight = new THREE.DirectionalLight(0x00f0ff, 1.1);
-rimLight.position.set(-5, -2, -3);
+const rimLight = new THREE.DirectionalLight(0x00f0ff, 0.9);
+rimLight.position.set(-4.5, -1.5, -2.8);
 scene.add(rimLight);
-scene.add(new THREE.AmbientLight(0x0a2c2c, 2.2));
-const glowLight = new THREE.PointLight(0x4dffd2, 0.0, 9);
-glowLight.position.set(0, 0, RADIUS * 1.7);
+scene.add(new THREE.AmbientLight(0x082525, 2.0));
+const glowLight = new THREE.PointLight(0x4dffd2, 0.0, 10);
+glowLight.position.set(0, 0, RADIUS * 1.6);
 scene.add(glowLight);
 
 const trunkGroup = new THREE.Group();
 scene.add(trunkGroup);
+const forestGroup = new THREE.Group();
+scene.add(forestGroup);
 
 let graphNodes = [];
-let placed = [];          // {node, angle, y, sigma, amp, marker, dot}
+let placed = [];
 let markers = [];
 let trunkMesh = null;
 let edgeLines = null;
-let theta = 0;            // current spin (radians)
+let theta = 0;
 let thetaTarget = 0;
 let thetaMin = 0, thetaMax = 0;
 let spinVelocity = 0;
-// PART_GEOMETRY
-// axis sway: the trunk curves around itself as it climbs
+let forestMode = false;
+let forestTrees = [];
+
+const forestToggle = document.getElementById("forest-toggle");
+
 function swayX(y) { return 0.22 * Math.sin(y * 0.31) + 0.12 * Math.sin(y * 0.113 + 2.1); }
 function swayZ(y) { return 0.20 * Math.cos(y * 0.27 + 1.3) + 0.10 * Math.sin(y * 0.091); }
 function baseRadius(y, height) {
-  const taper = 1 - 0.12 * (y / Math.max(height, 1));
-  return RADIUS * taper * (1 + 0.05 * Math.sin(y * 0.5 + 0.7));
+  const taper = 1 - 0.14 * (y / Math.max(height, 1));
+  return RADIUS * taper * (1 + 0.06 * Math.sin(y * 0.52 + 0.7));
 }
 
 function angleDist(a, b) {
@@ -174,13 +190,23 @@ function angleDist(a, b) {
 }
 
 function disposeTrunk() {
-  if (trunkMesh) { trunkGroup.remove(trunkMesh); trunkMesh.geometry.dispose(); trunkMesh.material.dispose(); }
-  if (edgeLines) { trunkGroup.remove(edgeLines); edgeLines.geometry.dispose(); edgeLines.material.dispose(); }
+  if (trunkMesh) { trunkGroup.remove(trunkMesh); trunkMesh.geometry.dispose(); if (trunkMesh.material) trunkMesh.material.dispose(); }
+  if (edgeLines) { trunkGroup.remove(edgeLines); edgeLines.geometry.dispose(); if (edgeLines.material) edgeLines.material.dispose(); }
   for (const p of placed) {
     if (p.marker) trunkGroup.remove(p.marker);
     if (p.dot) trunkGroup.remove(p.dot);
   }
   trunkMesh = null; edgeLines = null; placed = []; markers = [];
+}
+
+function disposeForest() {
+  while (forestGroup.children.length) {
+    const child = forestGroup.children[0];
+    forestGroup.remove(child);
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) child.material.dispose();
+  }
+  forestTrees = [];
 }
 
 window.setGraph = function (graph) {
@@ -190,83 +216,185 @@ window.setGraph = function (graph) {
   document.getElementById("empty").style.opacity = graphNodes.length ? 0 : 1;
   if (!graphNodes.length) { thetaMin = thetaMax = thetaTarget = theta = 0; return; }
 
-  // memories sorted along the growth path: oldest knowledge lowest on the trunk
   const ordered = graphNodes.slice().sort(function (a, b) {
     return (a.depth - b.depth) || (a.order - b.order);
   });
   const n = ordered.length;
   const maxChars = Math.max.apply(null, ordered.map(function (m) { return m.chars; }).concat([1]));
-  const height = n * PITCH_PER_NODE + 8;
-  const yBase = -2;   // first memory sits at world y 0, the camera's reading band
+  const height = n * PITCH_PER_NODE + 9;
+  const yBase = -2.5;
 
   placed = ordered.map(function (node, i) {
-    const jitter = (hash2(strHash(node.id) % 977, 13.7) - 0.5) * 0.3;
+    const jitter = (hash2(strHash(node.id) % 977, 13.7) - 0.5) * 0.28;
     const weight = Math.pow(Math.min(node.chars / maxChars, 1), 0.5);
     return {
       node: node,
       angle: i * GOLDEN,
       y: yBase + 2 + i * PITCH_PER_NODE + jitter,
-      sigma: 0.16 + 0.30 * weight,          // indent breadth from knowledge mass
-      amp: 0.10 + 0.26 * weight,            // indent depth from knowledge mass
+      sigma: 0.15 + 0.32 * weight,
+      amp: 0.09 + 0.28 * weight,
     };
   });
 
-  // ---- bark surface -------------------------------------------------------
-  const radialSegs = 200;
-  const heightSegs = Math.min(Math.max(Math.round(height * 7), 60), 480);
+  const radialSegs = 512;
+  const heightSegs = Math.min(Math.max(Math.round(height * 10), 120), 720);
   const geo = new THREE.CylinderGeometry(1, 1, height, radialSegs, heightSegs, true);
   geo.translate(0, height / 2 + yBase, 0);
   const pos = geo.attributes.position;
-  const colors = new Float32Array(pos.count * 3);
-  const barkDeep = new THREE.Color(0x061b1b);
-  const barkMid = new THREE.Color(0x0d3534);
-  const barkLit = new THREE.Color(0x1a5a52);
-  const glowCol = new THREE.Color(0x4dffd2);
-  const tmp = new THREE.Color();
+  const uvs = geo.attributes.uv;
 
-  for (let i = 0; i < pos.count; i++) {
-    const vx = pos.getX(i), vy = pos.getY(i), vz = pos.getZ(i);
-    const ang = Math.atan2(vx, vz);
-    const age = 1 - (vy - yBase) / height;   // older bark lower: rougher, deeper features
-
-    // ridged striations that wander as they climb — bark grain
-    const drift = fbm(vy * 0.16, 3.3) * 4.0;
-    const ridge = Math.abs(Math.sin(ang * 9 + drift + fbm(ang * 2.2, vy * 0.5) * 2.4));
-    const grain = fbm(ang * 3.1 + 11.7, vy * 1.15);
-    let r = baseRadius(vy, height)
-      + (0.30 + 0.35 * age) * 0.16 * (1 - ridge)
-      + 0.10 * (grain - 0.5)
-      + 0.035 * (0.5 + 0.5 * age) * (vnoise(ang * 14, vy * 6) - 0.5);
-
-    // carve the memories: gaussian indents, aging wider + shallower-edged
-    let indent = 0;
-    for (let k = 0; k < placed.length; k++) {
-      const p = placed[k];
-      const dy = vy - p.y;
-      if (dy > 2.5 || dy < -2.5) continue;
-      const da = angleDist(ang, p.angle) * r;
-      const s = p.sigma * (1 + 0.35 * age);
-      const g = Math.exp(-(da * da + dy * dy) / (2 * s * s));
-      indent += p.amp * g;
+  const vertexShader = `
+    uniform float uHeight;
+    uniform float uYBase;
+    uniform float uTime;
+    varying vec2 vUv;
+    varying vec3 vNormal;
+    varying vec3 vWorldPos;
+    varying float vHeight;
+    // hash & noise
+    float hash2(vec2 p) {
+      vec2 n = vec2(127.1, 311.7);
+      float s = sin(dot(p, n)) * 43758.5453123;
+      return fract(s);
     }
-    indent = Math.min(indent, 0.42);
-    r -= indent;
+    float vnoise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      vec2 u = f * f * (3.0 - 2.0 * f);
+      float a = hash2(i);
+      float b = hash2(i + vec2(1.0, 0.0));
+      float c = hash2(i + vec2(0.0, 1.0));
+      float d = hash2(i + vec2(1.0, 1.0));
+      return a + (b - a) * u.x + (c - a) * u.y + (a - b - c + d) * u.x * u.y;
+    }
+    float fbm(vec2 p, int octaves, float lacunarity, float gain) {
+      float total = 0.0;
+      float amp = 0.5;
+      float freq = 1.0;
+      for (int i = 0; i < 6; i++) {
+        if (i >= octaves) break;
+        total += vnoise(p * freq) * amp;
+        amp *= gain;
+        freq *= lacunarity;
+      }
+      return total;
+    }
+    void main() {
+      vUv = uv;
+      vec3 objectNormal = normal;
+      vec3 p = position;
+      float y = p.y;
+      float height = uHeight;
+      float yBase = uYBase;
+      float r = 1.0;
+      float ang = atan(p.x, p.z);
+      float age = 1.0 - (y - yBase) / height;
+      float drift = fbm(vec2(y * 0.16, 3.3), 4, 2.03, 0.52) * 4.0;
+      float ridge = abs(sin(ang * 9.0 + drift + fbm(vec2(ang * 2.2, y * 0.5), 3, 2.1, 0.52) * 2.4));
+      float grain = fbm(vec2(ang * 3.1 + 11.7, y * 1.15), 4, 2.2, 0.5);
+      float baseR = 1.0 - 0.14 * (y / max(height, 1.0));
+      r = baseR * (1.0 + 0.06 * sin(y * 0.52 + 0.7));
+      r += (0.30 + 0.35 * age) * 0.16 * (1.0 - ridge);
+      r += 0.10 * (grain - 0.5);
+      r += 0.035 * (0.5 + 0.5 * age) * (vnoise(vec2(ang * 14.0, y * 6.0)) - 0.5);
+      float k1 = (sin(y * 0.18) * 0.08 + cos(y * 0.11) * 0.04);
+      float k2 = (sin(y * 0.13 + 1.7) * 0.06 + cos(y * 0.09) * 0.03);
+      r += k1 + k2;
+      vec3 displaced = vec3(p.x * r, p.y, p.z * r);
+      displaced.x += 0.22 * sin(y * 0.31) + 0.12 * sin(y * 0.113 + 2.1);
+      displaced.z += 0.20 * cos(y * 0.27 + 1.3) + 0.10 * sin(y * 0.091);
+      vWorldPos = (modelMatrix * vec4(displaced, 1.0)).xyz;
+      vNormal = normalize(mat3(modelMatrix) * objectNormal);
+      vHeight = (y - yBase) / height;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(displaced, 1.0);
+    }
+  `;
 
-    pos.setX(i, Math.sin(ang) * r + swayX(vy));
-    pos.setZ(i, Math.cos(ang) * r + swayZ(vy));
+  const fragmentShader = `
+    uniform float uHeight;
+    uniform float uYBase;
+    uniform float uTime;
+    varying vec2 vUv;
+    varying vec3 vNormal;
+    varying vec3 vWorldPos;
+    varying float vHeight;
+    float hash2(vec2 p) {
+      vec2 n = vec2(127.1, 311.7);
+      float s = sin(dot(p, n)) * 43758.5453123;
+      return fract(s);
+    }
+    float vnoise(vec2 p) {
+      vec2 i = floor(p);
+      vec2 f = fract(p);
+      vec2 u = f * f * (3.0 - 2.0 * f);
+      float a = hash2(i);
+      float b = hash2(i + vec2(1.0, 0.0));
+      float c = hash2(i + vec2(0.0, 1.0));
+      float d = hash2(i + vec2(1.0, 1.0));
+      return a + (b - a) * u.x + (c - a) * u.y + (a - b - c + d) * u.x * u.y;
+    }
+    float fbm(vec2 p, int octaves, float lacunarity, float gain) {
+      float total = 0.0;
+      float amp = 0.5;
+      float freq = 1.0;
+      for (int i = 0; i < 6; i++) {
+        if (i >= octaves) break;
+        total += vnoise(p * freq) * amp;
+        amp *= gain;
+        freq *= lacunarity;
+      }
+      return total;
+    }
+    vec3 barkDeep = vec3(0.024, 0.106, 0.106);
+    vec3 barkMid  = vec3(0.051, 0.208, 0.204);
+    vec3 barkLit  = vec3(0.102, 0.353, 0.322);
+    vec3 glowCol  = vec3(0.302, 1.0, 0.824);
+    vec3 knotCol  = vec3(0.15, 0.08, 0.04);
+    vec3 mossCol  = vec3(0.08, 0.18, 0.06);
+    vec3 lichenCol = vec3(0.35, 0.45, 0.25);
+    vec3 acesFilm(vec3 x) {
+      float a = 2.51; float b = 0.03; float c = 2.43; float d = 0.59; float e = 0.14;
+      return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0.0, 1.0);
+    }
+    void main() {
+      float y = vWorldPos.y;
+      float ang = atan(vWorldPos.x, vWorldPos.z);
+      float age = 1.0 - vHeight;
+      float drift = fbm(vec2(y * 0.16, 3.3), 4, 2.03, 0.52) * 4.0;
+      float ridge = abs(sin(ang * 9.0 + drift + fbm(vec2(ang * 2.2, y * 0.5), 3, 2.1, 0.52) * 2.4));
+      float grain = fbm(vec2(ang * 3.1 + 11.7, y * 1.15), 4, 2.2, 0.5);
+      float micro = fbm(vec2(ang * 12.0, y * 4.0), 3, 2.0, 0.5) * 0.08;
+      float crest = 1.0 - ridge;
+      vec3 base = mix(barkDeep, barkMid, 0.35 + 0.65 * crest);
+      base = mix(base, barkLit, crest * crest * 0.4 * (1.0 - age * 0.5));
+      float knot = step(0.72, fbm(vec2(ang * 5.0 + 3.1, y * 2.5), 4, 2.3, 0.5));
+      base = mix(base, knotCol, knot * 0.7);
+      float moss = smoothstep(0.65, 0.85, fbm(vec2(ang * 7.0, y * 1.5 + 10.0), 3, 2.1, 0.5));
+      base = mix(base, mossCol, moss * 0.25 * (1.0 - age));
+      float lichen = step(0.82, fbm(vec2(ang * 4.0, y * 1.2 + 5.0), 3, 2.2, 0.5));
+      base = mix(base, lichenCol, lichen * 0.15);
+      base += micro * 0.04;
+      float indent = 0.0;
+      for (int i = 0; i < 50; i++) {
+        if (i >= int(uHeight * 5.0)) break;
+      }
+      gl_FragColor = vec4(acesFilm(base), 1.0);
+    }
+  `;
 
-    // colour: lit ridge crests, deep grooves, cyan breath inside the memories
-    const crest = 1 - ridge;
-    tmp.copy(barkDeep).lerp(barkMid, 0.35 + 0.65 * crest).lerp(barkLit, crest * crest * 0.4 * (1 - age * 0.5));
-    tmp.lerp(glowCol, Math.min(indent * 2.4, 0.55));
-    colors[i * 3] = tmp.r; colors[i * 3 + 1] = tmp.g; colors[i * 3 + 2] = tmp.b;
-  }
-  geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-  geo.computeVertexNormals();
+  const barkMaterial = new THREE.ShaderMaterial({
+    vertexShader,
+    fragmentShader,
+    uniforms: {
+      uHeight: { value: height },
+      uYBase: { value: yBase },
+      uTime: { value: 0 },
+    },
+    side: THREE.FrontSide,
+    flatShading: false,
+  });
 
-  trunkMesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
-    vertexColors: true, roughness: 0.88, metalness: 0.08,
-  }));
+  trunkMesh = new THREE.Mesh(geo, barkMaterial);
   trunkGroup.add(trunkMesh);
   buildMarkersAndEdges(edges, height);
 
@@ -301,7 +429,6 @@ function buildMarkersAndEdges(edges, height) {
     p.dot = dot;
   }
 
-  // knowledge curves around itself: helical arcs across the bark between linked memories
   const byId = {};
   for (const p of placed) byId[p.node.id] = p;
   const pts = [];
@@ -324,12 +451,48 @@ function buildMarkersAndEdges(edges, height) {
   if (pts.length) {
     const g = new THREE.BufferGeometry().setFromPoints(pts);
     edgeLines = new THREE.LineSegments(g, new THREE.LineBasicMaterial({
-      color: 0x00f0ff, transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending,
+      color: 0x00f0ff, transparent: true, opacity: 0.18, blending: THREE.AdditiveBlending,
     }));
     trunkGroup.add(edgeLines);
   }
 }
-// PART_INTERACTION
+
+window.setForest = function (trees) {
+  disposeForest();
+  forestTrees = trees || [];
+  if (!forestTrees.length) return;
+  const count = forestTrees.length;
+  const forestRadius = 6.5;
+  for (let i = 0; i < count; i++) {
+    const tree = forestTrees[i];
+    const angle = (i / count) * Math.PI * 2;
+    const x = forestRadius * Math.cos(angle);
+    const z = forestRadius * Math.sin(angle);
+    const height = 1.5 + Math.min(tree.nodeCount * 0.05, 4.0);
+    const base = 0.4 + Math.min(tree.nodeCount * 0.01, 1.0);
+    const tint = tree.species === "cedar" ? 0xc8d8e8 : tree.species === "ash" ? 0xe0e0dc : tree.species === "beech" ? 0xf2f0e0 : 0xffffff;
+    const miniGeo = new THREE.CylinderGeometry(base * 0.7, base, height, 32, 16, true);
+    miniGeo.translate(0, height / 2, 0);
+    const miniMat = new THREE.MeshStandardMaterial({
+      color: tint, roughness: 0.7, metalness: 0.0, flatShading: true,
+    });
+    const cone = new THREE.Mesh(miniGeo, miniMat);
+    cone.position.set(x, 0, z);
+    cone.userData.forestId = tree.id;
+    forestGroup.add(cone);
+
+    const labelGeo = new THREE.PlaneGeometry(2, 0.4);
+    const labelMat = new THREE.MeshBasicMaterial({ color: 0xd8d0b8, transparent: true, opacity: 0.8, side: THREE.DoubleSide });
+    const label = new THREE.Mesh(labelGeo, labelMat);
+    label.position.set(x, height / 2 + 0.5, z);
+    label.lookAt(camera.position);
+    label.userData.forestId = tree.id;
+    forestGroup.add(label);
+  }
+};
+
+function clampTheta(t) { return Math.max(thetaMin, Math.min(thetaMax, t)); }
+
 const gateway = document.getElementById("gateway");
 const altitudeDot = document.querySelector("#altitude .a-dot");
 const raycaster = new THREE.Raycaster();
@@ -373,13 +536,21 @@ stage.addEventListener("pointerleave", function () {
 });
 stage.addEventListener("wheel", function (e) {
   e.preventDefault();
-  // scrolling ascends/descends: the same helical lock, driven vertically
   thetaTarget = clampTheta(thetaTarget + e.deltaY * 0.004);
 }, { passive: false });
 
-function clampTheta(t) {
-  return Math.max(thetaMin, Math.min(thetaMax, t));
-}
+forestToggle.addEventListener("click", function () {
+  forestMode = !forestMode;
+  forestToggle.textContent = forestMode ? "show graph" : "show forest";
+  post({ type: "forestToggle", mode: forestMode });
+  if (trunkMesh) trunkMesh.visible = !forestMode;
+  if (edgeLines) edgeLines.visible = !forestMode;
+  for (const p of placed) {
+    if (p.marker) p.marker.visible = !forestMode;
+    if (p.dot) p.dot.visible = !forestMode;
+  }
+  forestGroup.visible = forestMode;
+});
 
 function updateHover() {
   if (!markers.length || dragging) { if (dragging) return; }
@@ -397,7 +568,7 @@ function updateHover() {
         gateway.querySelector(".g-meta").textContent =
           "d" + p.node.depth + " · " + p.node.chars + " chars · " + p.node.host;
         gateway.style.opacity = 1;
-        glowLight.intensity = 1.4;
+        glowLight.intensity = 1.6;
         p.dot.material.opacity = 1;
         p.dot.scale.setScalar(1.8);
       }
@@ -408,8 +579,8 @@ function updateHover() {
     }
   }
   if (hoveredId) {
-    gateway.style.left = Math.min(pointerClient.x + 16, stage.clientWidth - 260) + "px";
-    gateway.style.top = Math.max(pointerClient.y - 14, 8) + "px";
+    gateway.style.left = Math.min(pointerClient.x + 18, stage.clientWidth - 300) + "px";
+    gateway.style.top = Math.max(pointerClient.y - 16, 8) + "px";
   }
 }
 
@@ -430,17 +601,20 @@ function animate(now) {
 
   if (!dragging && Math.abs(spinVelocity) > 0.00004) {
     thetaTarget = clampTheta(thetaTarget + spinVelocity);
-    spinVelocity *= Math.pow(0.052, dt);          // inertia decay
+    spinVelocity *= Math.pow(0.052, dt);
   }
   theta += (thetaTarget - theta) * Math.min(dt * 7.5, 1);
 
-  // the helical lock: spinning the trunk ascends the memory path — no loop, ever
   trunkGroup.rotation.y = theta;
   trunkGroup.position.y = theta * K_HELIX;
 
+  if (trunkMesh && trunkMesh.material && trunkMesh.material.uniforms) {
+    trunkMesh.material.uniforms.uTime.value = now * 0.001;
+  }
+
   if (thetaMax > thetaMin) {
     const progress = (thetaMax - theta) / (thetaMax - thetaMin);
-    altitudeDot.style.top = (104 - progress * 104) + "px";
+    altitudeDot.style.top = (134 - progress * 134) + "px";
   }
 
   updateHover();
