@@ -99,9 +99,76 @@ class CompilerConfig(BaseSettings):
     )
 
     memory_payload_streaming_threshold_bytes: int = Field(
-        default=1_048_576,  # 1 MB
+        default=1_048_576,
         ge=1024,
         description="Payload size threshold (bytes) above which streaming/pagination is mandatory",
+    )
+
+    # ─── Translation & Language ──────────────────────────────────────
+
+    translate_enabled: bool = Field(
+        default=True,
+        description="Enable automatic translation of non-target-language pages",
+    )
+
+    target_language: str = Field(
+        default="en",
+        min_length=2,
+        max_length=5,
+        description="Target language code for translation (ISO 639-1)",
+    )
+
+    translation_backends: str = Field(
+        default="libretranslate,google,mymemory",
+        description="Comma-separated list of translation backends in priority order",
+    )
+
+    libretranslate_url: str = Field(
+        default="https://libretranslate.de",
+        description="Base URL for LibreTranslate instance",
+    )
+
+    libretranslate_api_key: str | None = Field(
+        default=None,
+        description="API key for LibreTranslate (if required)",
+    )
+
+    mymemory_email: str | None = Field(
+        default=None,
+        description="Email for MyMemory API (increases rate limits)",
+    )
+
+    translation_timeout: float = Field(
+        default=30.0,
+        ge=5.0,
+        le=120.0,
+        description="Timeout in seconds for translation requests",
+    )
+
+    translation_cache_enabled: bool = Field(
+        default=True,
+        description="Enable in-memory translation cache",
+    )
+
+    language_detection_enabled: bool = Field(
+        default=True,
+        description="Enable automatic language detection",
+    )
+
+    language_detection_backend: str = Field(
+        default="langdetect",
+        description="Language detection backend: langdetect or fasttext",
+    )
+
+    fasttext_model_path: str | None = Field(
+        default=None,
+        description="Path to fastText language identification model (.bin)",
+    )
+
+    min_text_for_detection: int = Field(
+        default=50,
+        ge=10,
+        description="Minimum text length for reliable language detection",
     )
 
     @field_validator("graph_db_path")
@@ -111,7 +178,16 @@ class CompilerConfig(BaseSettings):
             return v.expanduser().resolve()
         return v
 
+    @field_validator("translation_backends")
+    @classmethod
+    def _parse_backends(cls, v: str) -> str:
+        return ",".join(b.strip() for b in v.split(",") if b.strip())
+
     @property
     def concurrency_semaphore_value(self) -> int:
         """Expose the semaphore bound for DI wiring."""
         return self.max_concurrent_requests
+
+    @property
+    def translation_backend_list(self) -> list[str]:
+        return [b.strip() for b in self.translation_backends.split(",") if b.strip()]

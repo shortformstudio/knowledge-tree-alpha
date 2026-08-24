@@ -13,8 +13,10 @@ from __future__ import annotations
 
 from ..graph.store import GraphStore
 from ..telemetry import EventBus
+from .cleaner import ContentCleaner
 from .fetcher import Fetcher
-from .parser import Parser
+from .langdetect import LanguageDetector, create_detector
+from .translator import Translator, create_translator
 
 
 class Crawler:
@@ -24,8 +26,8 @@ class Crawler:
     ----------
     fetcher : Fetcher
         Rate-limited HTTP fetcher.
-    parser : Parser
-        HTML-to-text + link extractor.
+    parser : ContentCleaner
+        HTML-to-text + link extractor with cleaning.
     max_depth : int
         Hard ceiling on BFS depth (d ∈ {1, 2, 3}).
     graph : GraphStore
@@ -34,32 +36,47 @@ class Crawler:
         Truncation length for page text stored in graph nodes.
     event_bus : EventBus
         Telemetry sink for crawl lifecycle events.
+    lang_detector : LanguageDetector | None
+        Optional language detector for identifying page language.
+    translator : Translator | None
+        Optional translator for converting non-target-language content.
+    target_language : str
+        Target language code (ISO 639-1) for translation.
     """
 
     __slots__ = (
         "_fetcher",
-        "_parser",
+        "_cleaner",
         "_max_depth",
         "_graph",
         "_max_content_chars",
         "_event_bus",
+        "_lang_detector",
+        "_translator",
+        "_target_language",
     )
 
     def __init__(
         self,
         fetcher: Fetcher,
-        parser: Parser,
+        cleaner: ContentCleaner,
         max_depth: int,
         graph: GraphStore,
         max_content_chars: int,
         event_bus: EventBus,
+        lang_detector: LanguageDetector | None = None,
+        translator: Translator | None = None,
+        target_language: str = "en",
     ) -> None:
         self._fetcher = fetcher
-        self._parser = parser
+        self._cleaner = cleaner
         self._max_depth = max_depth
         self._graph = graph
         self._max_content_chars = max_content_chars
         self._event_bus = event_bus
+        self._lang_detector = lang_detector
+        self._translator = translator
+        self._target_language = target_language
 
     # ------------------------------------------------------------------
     # Public API
@@ -95,7 +112,25 @@ class Crawler:
                 )
                 continue
 
-            text, links = self._parser.extract(html, current_url)
+            text, links = self._cleaner.clean(html, current_url)
+
+            detected_lang = None
+            translated = False
+            if self._lang_detector and len(text) >= 20:
+                lang_result = self._lang_detector.detect(text)
+                if lang_result:
+                    detected_lang = lang_result.code
+                    if (lang_result.code != self._target_language
+                        and lang_result.confidence > 0.7
+                        and self._translator):
+                        trans_result = await self._translator.translate(
+                            text[:5000],
+                            source_lang=lang_result.code,
+                            target_lang=self._target_language,
+                        )
+                        if trans_result and trans_result.text != text:
+                            text = trans_result.text
+                            translated = True
 
             truncated = text[: self._max_content_chars]
 
@@ -108,7 +143,13 @@ class Crawler:
             self._event_bus.emit(
                 "crawl:node_visited",
                 "Crawler",
-                {"url": current_url, "depth": depth, "chars": len(truncated)},
+                {
+                    "url": current_url,
+                    "depth": depth,
+                    "chars": len(truncated),
+                    "lang": detected_lang,
+                    "translated": translated,
+                },
                 version="v2",
             )
 

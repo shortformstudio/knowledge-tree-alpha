@@ -19,9 +19,11 @@ from .config import CompilerConfig
 
 if TYPE_CHECKING:
     from .graph.store import GraphStore
+    from .ingestion.cleaner import ContentCleaner
     from .ingestion.crawler import Crawler
     from .ingestion.fetcher import Fetcher
-    from .ingestion.parser import Parser
+    from .ingestion.langdetect import LanguageDetector
+    from .ingestion.translator import Translator
     from .semantic.compiler import SemanticCompiler
     from .social.profiler import SocialProfiler
     from .telemetry import EventBus, EventUpcaster
@@ -43,7 +45,9 @@ class Container:
 
     _graph: GraphStore | None = field(default=None, init=False)
     _fetcher: Fetcher | None = field(default=None, init=False)
-    _parser: Parser | None = field(default=None, init=False)
+    _cleaner: ContentCleaner | None = field(default=None, init=False)
+    _lang_detector: LanguageDetector | None = field(default=None, init=False)
+    _translator: Translator | None = field(default=None, init=False)
     _crawler: Crawler | None = field(default=None, init=False)
     _semantic: SemanticCompiler | None = field(default=None, init=False)
     _social: SocialProfiler | None = field(default=None, init=False)
@@ -105,12 +109,46 @@ class Container:
         return self._fetcher
 
     @property
-    def parser(self) -> Parser:
-        if self._parser is None:
-            from .ingestion.parser import Parser
+    def cleaner(self) -> ContentCleaner:
+        if self._cleaner is None:
+            from .ingestion.cleaner import ContentCleaner
 
-            self._parser = Parser()
-        return self._parser
+            self._cleaner = ContentCleaner(
+                keep_links=False,
+                keep_images=False,
+                min_text_length=50,
+            )
+        return self._cleaner
+
+    @property
+    def lang_detector(self) -> LanguageDetector | None:
+        if not self.config.language_detection_enabled:
+            return None
+        if self._lang_detector is None:
+            from .ingestion.langdetect import create_detector
+
+            self._lang_detector = create_detector(
+                use_langdetect=self.config.language_detection_backend == "langdetect",
+                fasttext_model=self.config.fasttext_model_path,
+            )
+        return self._lang_detector
+
+    @property
+    def translator(self) -> Translator | None:
+        if not self.config.translate_enabled:
+            return None
+        if self._translator is None:
+            from .ingestion.translator import create_translator
+
+            self._translator = create_translator(
+                backends=self.config.translation_backend_list,
+                libretranslate_url=self.config.libretranslate_url,
+                libretranslate_key=self.config.libretranslate_api_key,
+                mymemory_email=self.config.mymemory_email,
+                timeout=self.config.translation_timeout,
+                use_cache=self.config.translation_cache_enabled,
+            )
+        return self._translator
 
     @property
     def crawler(self) -> Crawler:
@@ -119,11 +157,14 @@ class Container:
 
             self._crawler = Crawler(
                 fetcher=self.fetcher,
-                parser=self.parser,
+                cleaner=self.cleaner,
                 max_depth=self.config.max_depth,
                 graph=self.graph,
                 max_content_chars=self.config.max_content_chars,
                 event_bus=self.event_bus,
+                lang_detector=self.lang_detector,
+                translator=self.translator,
+                target_language=self.config.target_language,
             )
         return self._crawler
 
@@ -142,7 +183,7 @@ class Container:
 
             self._social = SocialProfiler(
                 fetcher=self.fetcher,
-                parser=self.parser,
+                cleaner=self.cleaner,
                 graph=self.graph,
                 max_posts=self.config.max_social_posts,
                 event_bus=self.event_bus,
@@ -182,6 +223,14 @@ class Container:
                 else:
                     loop.run_until_complete(self._fetcher.close())
 
+        if self._translator is not None and hasattr(self._translator, "close"):
+            with contextlib.suppress(Exception):
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(self._translator.close())
+                else:
+                    loop.run_until_complete(self._translator.close())
+
         if self._graph is not None:
             with contextlib.suppress(Exception):
                 self._graph.close()
@@ -199,6 +248,10 @@ class Container:
         if self._fetcher is not None:
             with contextlib.suppress(Exception):
                 await self._fetcher.close()
+
+        if self._translator is not None and hasattr(self._translator, "close"):
+            with contextlib.suppress(Exception):
+                await self._translator.close()
 
         if self._graph is not None:
             with contextlib.suppress(Exception):

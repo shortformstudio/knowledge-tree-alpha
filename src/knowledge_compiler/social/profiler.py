@@ -18,8 +18,8 @@ from typing import Any
 from bs4 import BeautifulSoup
 
 from ..graph.store import GraphStore
+from ..ingestion.cleaner import ContentCleaner
 from ..ingestion.fetcher import Fetcher
-from ..ingestion.parser import Parser
 from ..telemetry import EventBus
 
 PLATFORM_SCRAPERS: dict[str, str] = {
@@ -37,8 +37,8 @@ class SocialProfiler:
     ----------
     fetcher : Fetcher
         Rate-limited HTTP fetcher.
-    parser : Parser
-        HTML parser (used for generic page extraction).
+    cleaner : ContentCleaner
+        HTML cleaner for extracting text from generic pages.
     graph : GraphStore
         Knowledge graph to populate with profile and post nodes.
     max_posts : int
@@ -47,18 +47,18 @@ class SocialProfiler:
         Telemetry sink.
     """
 
-    __slots__ = ("_fetcher", "_parser", "_graph", "_max_posts", "_event_bus")
+    __slots__ = ("_fetcher", "_cleaner", "_graph", "_max_posts", "_event_bus")
 
     def __init__(
         self,
         fetcher: Fetcher,
-        parser: Parser,
+        cleaner: ContentCleaner,
         graph: GraphStore,
         max_posts: int,
         event_bus: EventBus,
     ) -> None:
         self._fetcher = fetcher
-        self._parser = parser
+        self._cleaner = cleaner
         self._graph = graph
         self._max_posts = max_posts
         self._event_bus = event_bus
