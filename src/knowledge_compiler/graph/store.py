@@ -12,6 +12,7 @@ Invariants
 - SQLite mutations are batched: commits flush once per logical operation
   boundary or when ``flush()`` is called explicitly.
 - Nodes carry a ``_added_at`` timestamp for TTL-based eviction.
+- Crawl sessions are tracked with tree structures showing link chains.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -77,7 +79,10 @@ class GraphStore:
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS nodes ("
             "id TEXT PRIMARY KEY, type TEXT, content TEXT, depth INTEGER, "
-            "added_at REAL)"
+            "added_at REAL, crawl_id TEXT, parent_url TEXT, crawl_order INTEGER)"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_nodes_crawl_id ON nodes(crawl_id)"
         )
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS edges (source TEXT, target TEXT, relation TEXT, "
@@ -85,21 +90,29 @@ class GraphStore:
             "FOREIGN KEY (source) REFERENCES nodes(id), "
             "FOREIGN KEY (target) REFERENCES nodes(id))"
         )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS crawl_sessions ("
+            "crawl_id TEXT PRIMARY KEY, start_url TEXT, start_time REAL, "
+            "max_depth INTEGER, nodes_count INTEGER, edges_count INTEGER)"
+        )
         self._db.commit()
 
     def _load_from_db(self) -> None:
         if self._db is None:
             return
         for row in self._db.execute(
-            "SELECT id, type, content, depth, added_at FROM nodes"
+            "SELECT id, type, content, depth, added_at, crawl_id, parent_url, crawl_order FROM nodes"
         ):
-            node_id, ntype, content, depth, added_at = row
+            node_id, ntype, content, depth, added_at, crawl_id, parent_url, crawl_order = row
             self._graph.add_node(
                 node_id,
                 type=ntype,
                 content=content or "",
                 depth=depth or 0,
                 _added_at=added_at or time.time(),
+                crawl_id=crawl_id,
+                parent_url=parent_url,
+                crawl_order=crawl_order or 0,
             )
         for row in self._db.execute("SELECT source, target, relation FROM edges"):
             source, target, relation = row
@@ -136,14 +149,17 @@ class GraphStore:
             self._db.execute("BEGIN")
             for node_id, attrs in self._pending:
                 self._db.execute(
-                    "INSERT OR REPLACE INTO nodes (id, type, content, depth, added_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "INSERT OR REPLACE INTO nodes (id, type, content, depth, added_at, crawl_id, parent_url, crawl_order) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         node_id,
                         attrs.get("type", ""),
                         attrs.get("content", ""),
                         attrs.get("depth", 0),
                         attrs.get("_added_at", time.time()),
+                        attrs.get("crawl_id"),
+                        attrs.get("parent_url"),
+                        attrs.get("crawl_order", 0),
                     ),
                 )
             self._db.commit()
@@ -153,6 +169,107 @@ class GraphStore:
             raise
         finally:
             self._pending.clear()
+
+    # ------------------------------------------------------------------
+    # Crawl Session Tracking
+    # ------------------------------------------------------------------
+
+    def start_crawl_session(
+        self, start_url: str, max_depth: int
+    ) -> str:
+        """Create a new crawl session and return its unique ID."""
+        crawl_id = str(uuid.uuid4())[:8]
+        if self._db is not None:
+            self._db.execute(
+                "INSERT INTO crawl_sessions (crawl_id, start_url, start_time, max_depth, nodes_count, edges_count) "
+                "VALUES (?, ?, ?, ?, 0, 0)",
+                (crawl_id, start_url, time.time(), max_depth),
+            )
+            self._db.commit()
+        self._event_bus.emit(
+            "crawl:session_start",
+            "GraphStore",
+            {"crawl_id": crawl_id, "start_url": start_url, "max_depth": max_depth},
+            version="v2",
+        )
+        return crawl_id
+
+    def end_crawl_session(self, crawl_id: str) -> None:
+        """Finalize a crawl session with final counts."""
+        if self._db is not None:
+            nodes = self._db.execute(
+                "SELECT COUNT(*) FROM nodes WHERE crawl_id = ?", (crawl_id,)
+            ).fetchone()[0]
+            edges = self._db.execute(
+                "SELECT COUNT(*) FROM edges e "
+                "JOIN nodes n ON e.source = n.id "
+                "WHERE n.crawl_id = ?", (crawl_id,)
+            ).fetchone()[0]
+            self._db.execute(
+                "UPDATE crawl_sessions SET nodes_count = ?, edges_count = ? WHERE crawl_id = ?",
+                (nodes, edges, crawl_id),
+            )
+            self._db.commit()
+        self._event_bus.emit(
+            "crawl:session_end",
+            "GraphStore",
+            {"crawl_id": crawl_id, "nodes": nodes, "edges": edges},
+            version="v2",
+        )
+
+    def get_crawl_sessions(self) -> list[dict[str, Any]]:
+        """Return all recorded crawl sessions."""
+        if self._db is None:
+            return []
+        sessions = []
+        for row in self._db.execute(
+            "SELECT crawl_id, start_url, start_time, max_depth, nodes_count, edges_count "
+            "FROM crawl_sessions ORDER BY start_time DESC"
+        ):
+            sessions.append({
+                "crawl_id": row[0],
+                "start_url": row[1],
+                "start_time": row[2],
+                "max_depth": row[3],
+                "nodes_count": row[4],
+                "edges_count": row[5],
+            })
+        return sessions
+
+    def get_crawl_tree(self, crawl_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Return the crawl tree for a session as (nodes, edges).
+
+        Nodes include: id, type, content, depth, crawl_order, parent_url
+        Edges include: source, target, relation
+        """
+        nodes = []
+        for row in self._db.execute(
+            "SELECT id, type, content, depth, crawl_order, parent_url "
+            "FROM nodes WHERE crawl_id = ? ORDER BY crawl_order",
+            (crawl_id,),
+        ):
+            nodes.append({
+                "id": row[0],
+                "type": row[1],
+                "content": row[2],
+                "depth": row[3],
+                "crawl_order": row[4],
+                "parent_url": row[5],
+            })
+
+        edges = []
+        node_ids = {n["id"] for n in nodes}
+        for row in self._db.execute(
+            "SELECT source, target, relation FROM edges"
+        ):
+            if row[0] in node_ids and row[1] in node_ids:
+                edges.append({
+                    "source": row[0],
+                    "target": row[1],
+                    "relation": row[2],
+                })
+
+        return nodes, edges
 
     # ------------------------------------------------------------------
     # Query

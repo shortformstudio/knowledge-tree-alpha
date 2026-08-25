@@ -19,6 +19,10 @@ struct ContentView: View {
         origin: CGPoint(x: 910, y: 80),
         size: CGSize(width: 480, height: 520)
     )
+    @State private var crawlTreeFrame = PanelFrame(
+        origin: CGPoint(x: 1350, y: 80),
+        size: CGSize(width: 520, height: 600)
+    )
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -40,6 +44,10 @@ struct ContentView: View {
 
                 GlassPanel(title: "profile scraper", frame: $scraperFrame, minSize: CGSize(width: 380, height: 340)) {
                     ProfileScraperPanel(model: model)
+                }
+
+                GlassPanel(title: "crawl trees", frame: $crawlTreeFrame, minSize: CGSize(width: 400, height: 400)) {
+                    CrawlTreePanel(model: model)
                 }
 
                 if let node = model.selectedNode {

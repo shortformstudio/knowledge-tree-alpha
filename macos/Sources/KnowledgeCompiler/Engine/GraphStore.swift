@@ -8,25 +8,79 @@ struct PageNode: Identifiable, Codable, Sendable, Equatable {
     let excerpt: String
     let rawText: String
     let fetchedAt: Date
+    let crawlId: String?
+    let parentUrl: String?
+    let crawlOrder: Int
+
+    init(
+        id: String,
+        title: String,
+        depth: Int,
+        chars: Int,
+        excerpt: String = "",
+        rawText: String = "",
+        fetchedAt: Date = Date(),
+        crawlId: String? = nil,
+        parentUrl: String? = nil,
+        crawlOrder: Int = 0
+    ) {
+        self.id = id
+        self.title = title
+        self.depth = depth
+        self.chars = chars
+        self.excerpt = excerpt
+        self.rawText = rawText
+        self.fetchedAt = fetchedAt
+        self.crawlId = crawlId
+        self.parentUrl = parentUrl
+        self.crawlOrder = crawlOrder
+    }
 }
 
 struct GraphEdge: Codable, Sendable, Hashable {
     let source: String
     let target: String
+
+    static func == (lhs: GraphEdge, rhs: GraphEdge) -> Bool {
+        lhs.source == rhs.source && lhs.target == rhs.target
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(source)
+        hasher.combine(target)
+    }
+}
+
+struct CrawlSession: Identifiable, Codable, Sendable {
+    let id: String
+    let startUrl: String
+    let startTime: Date
+    let maxDepth: Int
+    let nodesCount: Int
+    let edgesCount: Int
+
+    var title: String {
+        let host = URL(string: startUrl)?.host ?? startUrl
+        return "\(host) · \(nodesCount) nodes · \(edgesCount) edges"
+    }
 }
 
 @MainActor
 final class GraphStore: ObservableObject {
     @Published private(set) var nodes: [PageNode] = []
     @Published private(set) var edges: [GraphEdge] = []
+    @Published private(set) var crawlSessions: [CrawlSession] = []
 
     private var nodeIndex: [String: Int] = [:]
     private var edgeSet: Set<GraphEdge> = []
+    private var sessionIndex: [String: Int] = [:]
 
     var storageID: UUID?
 
     var nodeCount: Int { nodes.count }
     var edgeCount: Int { edges.count }
+
+    init() {}
 
     func addNode(_ node: PageNode) {
         if let existing = nodeIndex[node.id] {
@@ -44,11 +98,36 @@ final class GraphStore: ObservableObject {
         }
     }
 
+    func addCrawlSession(_ session: CrawlSession) {
+        if let existing = sessionIndex[session.id] {
+            crawlSessions[existing] = session
+        } else {
+            sessionIndex[session.id] = crawlSessions.count
+            crawlSessions.append(session)
+        }
+    }
+
+    func getCrawlTree(for sessionId: String) -> (nodes: [PageNode], edges: [GraphEdge]) {
+        let treeNodes = nodes.filter { $0.crawlId == sessionId }
+        let nodeIds = Set(treeNodes.map { $0.id })
+        let treeEdges = edges.filter { nodeIds.contains($0.source) && nodeIds.contains($0.target) }
+        return (treeNodes.sorted { $0.crawlOrder < $1.crawlOrder }, treeEdges)
+    }
+
+    func getAllCrawlTrees() -> [(CrawlSession, [PageNode], [GraphEdge])] {
+        return crawlSessions.map { session in
+            let (nodes, edges) = getCrawlTree(for: session.id)
+            return (session, nodes, edges)
+        }
+    }
+
     func clear() {
         nodes.removeAll()
         edges.removeAll()
+        crawlSessions.removeAll()
         nodeIndex.removeAll()
         edgeSet.removeAll()
+        sessionIndex.removeAll()
     }
 
     // MARK: - Persistence
@@ -56,6 +135,7 @@ final class GraphStore: ObservableObject {
     private struct Snapshot: Codable {
         let nodes: [PageNode]
         let edges: [GraphEdge]
+        let crawlSessions: [CrawlSession]
         let savedAt: Date
     }
 
@@ -77,7 +157,7 @@ final class GraphStore: ObservableObject {
 
     func save() throws {
         let url = storageID.map { Self.storageURL(for: $0) } ?? Self.storageURL
-        let snapshot = Snapshot(nodes: nodes, edges: edges, savedAt: Date())
+        let snapshot = Snapshot(nodes: nodes, edges: edges, crawlSessions: crawlSessions, savedAt: Date())
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -93,5 +173,6 @@ final class GraphStore: ObservableObject {
         clear()
         snapshot.nodes.forEach { addNode($0) }
         snapshot.edges.forEach { addEdge(source: $0.source, target: $0.target) }
+        snapshot.crawlSessions.forEach { addCrawlSession($0) }
     }
 }

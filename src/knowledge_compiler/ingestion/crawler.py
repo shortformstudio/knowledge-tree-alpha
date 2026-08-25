@@ -7,6 +7,7 @@ Formal guarantee
 - The state DAG (depth-ordered queue) ensures no node is visited twice
   and that depth strictly increases along every path.
 - Pending nodes are flushed to SQLite in a single batch at crawl completion.
+- Each crawl session records a tree structure showing exact link chains followed.
 """
 
 from __future__ import annotations
@@ -15,8 +16,8 @@ from ..graph.store import GraphStore
 from ..telemetry import EventBus
 from .cleaner import ContentCleaner
 from .fetcher import Fetcher
-from .langdetect import LanguageDetector, create_detector
-from .translator import Translator, create_translator
+from .langdetect import LanguageDetector
+from .translator import Translator
 
 
 class Crawler:
@@ -26,7 +27,7 @@ class Crawler:
     ----------
     fetcher : Fetcher
         Rate-limited HTTP fetcher.
-    parser : ContentCleaner
+    cleaner : ContentCleaner
         HTML-to-text + link extractor with cleaning.
     max_depth : int
         Hard ceiling on BFS depth (d ∈ {1, 2, 3}).
@@ -84,30 +85,34 @@ class Crawler:
 
     async def crawl(self, start_url: str) -> tuple[int, int]:
         """Execute a BFS crawl from *start_url* and return (nodes, edges)."""
+        crawl_id = self._graph.start_crawl_session(start_url, self._max_depth)
+
         visited: set[str] = set()
-        queue: list[tuple[str, int]] = [(start_url, 0)]
+        queue: list[tuple[str, int, str | None, int]] = [(start_url, 0, None, 0)]
+        crawl_order = 0
 
         self._event_bus.emit(
             "crawl:start",
             "Crawler",
-            {"url": start_url, "max_depth": self._max_depth},
+            {"url": start_url, "max_depth": self._max_depth, "crawl_id": crawl_id},
             version="v2",
         )
 
         while queue:
-            current_url, depth = queue.pop(0)
+            current_url, depth, parent_url, order = queue.pop(0)
 
             if current_url in visited or depth > self._max_depth:
                 continue
 
             visited.add(current_url)
+            crawl_order += 1
 
             html = await self._fetcher.fetch(current_url)
             if html is None:
                 self._event_bus.emit(
                     "crawl:skip",
                     "Crawler",
-                    {"url": current_url, "reason": "fetch_failed"},
+                    {"url": current_url, "reason": "fetch_failed", "crawl_id": crawl_id},
                     version="v2",
                 )
                 continue
@@ -139,6 +144,9 @@ class Crawler:
                 type="webpage",
                 content=truncated,
                 depth=depth,
+                crawl_id=crawl_id,
+                parent_url=parent_url,
+                crawl_order=crawl_order,
             )
             self._event_bus.emit(
                 "crawl:node_visited",
@@ -149,6 +157,9 @@ class Crawler:
                     "chars": len(truncated),
                     "lang": detected_lang,
                     "translated": translated,
+                    "crawl_id": crawl_id,
+                    "parent_url": parent_url,
+                    "crawl_order": crawl_order,
                 },
                 version="v2",
             )
@@ -161,14 +172,19 @@ class Crawler:
                         relation="links_to",
                     )
                     if link not in visited:
-                        queue.append((link, depth + 1))
+                        queue.append((link, depth + 1, current_url, crawl_order))
 
         self._graph.flush()
+        self._graph.end_crawl_session(crawl_id)
 
         self._event_bus.emit(
             "crawl:complete",
             "Crawler",
-            {"nodes": self._graph.node_count, "edges": self._graph.edge_count},
+            {
+                "nodes": self._graph.node_count,
+                "edges": self._graph.edge_count,
+                "crawl_id": crawl_id,
+            },
             version="v2",
         )
 
