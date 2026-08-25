@@ -69,14 +69,6 @@ class StealthScraper:
             "--disable-plugins-discovery",
         ]
 
-        self._browser = await self._playwright.chromium.launch(
-            headless=self._headless,
-            slow_mo=self._slow_mo,
-            proxy={"server": self._proxy} if self._proxy else None,
-            args=launch_args,
-        )
-
-        # Create context with realistic fingerprint
         viewport = random.choice(self.VIEWPORTS)
         user_agent = random.choice(self.USER_AGENTS)
 
@@ -97,11 +89,25 @@ class StealthScraper:
         }
 
         if self._user_data_dir:
-            context_options["user_data_dir"] = self._user_data_dir
+            # Use persistent context for session reuse
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                user_data_dir=self._user_data_dir,
+                headless=self._headless,
+                slow_mo=self._slow_mo,
+                proxy={"server": self._proxy} if self._proxy else None,
+                args=launch_args,
+                **context_options,
+            )
+            self._browser = None  # Not used with persistent context
+        else:
+            self._browser = await self._playwright.chromium.launch(
+                headless=self._headless,
+                slow_mo=self._slow_mo,
+                proxy={"server": self._proxy} if self._proxy else None,
+                args=launch_args,
+            )
+            self._context = await self._browser.new_context(**context_options)
 
-        self._context = await self._browser.new_context(**context_options)
-
-        # Inject stealth scripts
         await self._inject_stealth_scripts()
 
     async def _inject_stealth_scripts(self) -> None:
@@ -271,17 +277,41 @@ class StealthScraper:
 
             # Check if we hit a login wall
             login_wall = await page.query_selector(
-                'div[role="dialog"], form[action*="login"], text="Log in", text="Sign in"'
+                'div[role="dialog"], form[action*="login"]'
             )
             if login_wall:
                 # Try to dismiss or wait for public content
                 await page.wait_for_timeout(3000)
+            else:
+                # Also check for text-based login prompts
+                login_text = await page.evaluate("""
+                    () => {
+                        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                        let node;
+                        while (node = walker.nextNode()) {
+                            const text = node.textContent.trim().toLowerCase();
+                            if (text === 'log in' || text === 'sign in' || text === 'login') {
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                """)
+                if login_text:
+                    await page.wait_for_timeout(3000)
 
-            # Scroll to load more posts
+            # Initial scroll to load more content
             await self.human_like_scroll(page, scrolls=max_posts // 5 + 3)
 
             # Extract posts using multiple selector strategies
             posts = await self._extract_threads_posts(page, max_posts)
+
+            # If we only got login prompts, try to extract from body text directly
+            if len(posts) <= 1 and any("log in" in p.lower() for p in posts):
+                print("Only login prompts found, trying body text extraction...")
+                body_posts = await self._extract_from_body_text(page, max_posts)
+                if body_posts:
+                    return body_posts
 
             return posts
 
@@ -329,6 +359,83 @@ class StealthScraper:
                 continue
 
         return []
+
+    async def _extract_from_body_text(self, page: Page, max_posts: int) -> list[str]:
+        """Extract posts from body text when selectors fail.
+
+        Uses the fact that initial page load often contains first few posts
+        in the body text before the login wall.
+        """
+        try:
+            body_text = await page.evaluate("document.body.innerText")
+
+            # The posts appear in a pattern: handle, timestamp, content, metrics
+            lines = body_text.split('\n')
+            lines = [l.strip() for l in lines if l.strip()]
+
+            posts = []
+            current_post = []
+            seen_handles = set()
+
+            for line in lines:
+                lower = line.lower()
+
+                # Skip UI chrome
+                if any(skip in lower for skip in [
+                    'log in', 'sign up', 'continue with', 'follow',
+                    'mention', 'replies', 'media', 'reposts',
+                    'notifications', 'report a problem', 'terms', 'privacy',
+                    'cookies policy', 'say more', 'join threads', '© 202'
+                ]):
+                    continue
+
+                # Skip metrics (numbers with K/M)
+                if re.match(r'^[\d.,]+\s*[KMB]?$', line):
+                    continue
+
+                # Timestamp lines (Xh, Xd, Xm, Xw) - these separate posts
+                if re.match(r'^\d+[hmdw]$', line):
+                    if current_post:
+                        post = ' '.join(current_post)
+                        if len(post) > 50:
+                            posts.append(post)
+                            if len(posts) >= max_posts:
+                                break
+                        current_post = []
+                    continue
+
+                # Handle/username lines (appear before timestamp)
+                # Heuristic: short, no punctuation, not all lowercase
+                if (len(line) < 30 and
+                    not any(c in line for c in '.!?@#') and
+                    not line.isdigit()):
+                    # Check if this is a known handle pattern
+                    if line in seen_handles or re.match(r'^@?[a-zA-Z0-9_.]+$', line):
+                        if current_post:
+                            post = ' '.join(current_post)
+                            if len(post) > 50:
+                                posts.append(post)
+                                if len(posts) >= max_posts:
+                                    break
+                                current_post = []
+                            seen_handles.add(line)
+                        continue
+
+                # Content line
+                if len(line) > 10:
+                    current_post.append(line)
+
+            # Handle last post
+            if current_post:
+                post = ' '.join(current_post)
+                if len(post) > 50:
+                    posts.append(post)
+
+            return posts[:max_posts]
+
+        except Exception as e:
+            print(f"Body text extraction failed: {e}")
+            return []
 
     async def close(self) -> None:
         """Close browser and cleanup."""

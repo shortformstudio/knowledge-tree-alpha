@@ -11,7 +11,7 @@ import asyncio
 import json
 import sys
 
-from .stealth_scraper import scrape_threads_stealth
+from stealth_scraper import scrape_threads_stealth
 
 
 def main() -> int:
