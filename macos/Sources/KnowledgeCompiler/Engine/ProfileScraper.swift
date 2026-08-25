@@ -19,34 +19,189 @@ final class ProfileScraper: NSObject {
     private var webView: WKWebView?
     private var hiddenWindow: NSWindow?
 
+    // Stealth scraper configuration
+    var useStealthForThreads: Bool = true
+    var stealthMaxPosts: Int = 50
+    var stealthHeadless: Bool = true
+    var stealthProxy: String?
+    var stealthUserDataDir: String?
+
     init(log: LogSink) {
         self.log = log
         super.init()
     }
 
-    func scrape(url: URL) async throws -> ProfileScrapeResult {
-        let host = url.host ?? ""
-        let platform = detectPlatform(host: host)
-        let handle = extractHandle(url: url, platform: platform)
+    // MARK: - Stealth Threads Scraping
 
-        log.emit(.info, "scraper", "beginning profile scrape — @\(handle) on \(platform)")
+    private func scrapeThreadsWithStealth(handle: String, sourceURL: String) async throws -> [String] {
+        log.emit(.info, "scraper", "starting stealth threads scrape for @\(handle)")
 
-        let posts = try await scrapePosts(url: url, platform: platform)
-        let reversed = Array(posts.reversed())
+        // Find python and script path
+        let pythonPath = findPython()
+        let scriptPath = findStealthScript()
 
-        let mdContent = generateMarkdown(handle: handle, platform: platform, sourceURL: url.absoluteString, posts: reversed)
-        let mdURL = try saveMarkdown(content: mdContent, handle: handle, platform: platform)
+        var arguments = [
+            scriptPath,
+            handle,
+            "--max-posts", String(stealthMaxPosts),
+        ]
 
-        log.emit(.success, "scraper", "profile scrape complete — \(reversed.count) posts → \(mdURL.lastPathComponent)")
+        if stealthHeadless {
+            arguments.append("--headless")
+        } else {
+            arguments.append("--no-headless")
+        }
 
-        return ProfileScrapeResult(
-            handle: handle,
-            platform: platform,
-            postCount: reversed.count,
-            mdURL: mdURL,
-            scrapedAt: Date()
-        )
+        if let proxy = stealthProxy {
+            arguments.append(contentsOf: ["--proxy", proxy])
+        }
+
+        if let userDataDir = stealthUserDataDir {
+            arguments.append(contentsOf: ["--user-data-dir", userDataDir])
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: pythonPath)
+        process.arguments = arguments
+
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+
+            let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+
+            if process.terminationStatus != 0 {
+                let error = String(data: errorData, encoding: .utf8) ?? "unknown error"
+                log.emit(.error, "scraper", "stealth scrape failed: \(error)")
+                throw ScraperError.stealthFailed(error)
+            }
+
+            guard let output = String(data: outputData, encoding: .utf8),
+                  let json = try JSONSerialization.jsonObject(with: outputData) as? [String: Any] else {
+                log.emit(.error, "scraper", "stealth scrape: invalid JSON output")
+                throw ScraperError.stealthFailed("invalid JSON output")
+            }
+
+            if let error = json["error"] as? String {
+                log.emit(.error, "scraper", "stealth scrape error: \(error)")
+                throw ScraperError.stealthFailed(error)
+            }
+
+            guard let posts = json["posts"] as? [String] else {
+                log.emit(.warn, "scraper", "stealth scrape returned no posts")
+                return []
+            }
+
+            log.emit(.success, "scraper", "stealth scrape complete — \(posts.count) posts extracted")
+            return posts
+
+        } catch let error as ScraperError {
+            throw error
+        } catch {
+            log.emit(.error, "scraper", "stealth scrape exception: \(error)")
+            throw ScraperError.stealthFailed(error.localizedDescription)
+        }
     }
+
+    private func findPython() -> String {
+        let candidates = [
+            "/usr/bin/python3",
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+            "/Library/Developer/CommandLineTools/usr/bin/python3",
+        ]
+        for path in candidates {
+            if FileManager.default.fileExists(atPath: path) {
+                return path
+            }
+        }
+        // Fallback to which python3
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        task.arguments = ["python3"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        try? task.run()
+        task.waitUntilExit()
+        if let path = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !path.isEmpty {
+            return path
+        }
+        return "/usr/bin/python3"
+    }
+
+    private func findStealthScript() -> String {
+        // Look for the stealth_cli.py in the app bundle resources
+        if let path = Bundle.module.path(forResource: "stealth_cli", ofType: "py") {
+            return path
+        }
+        // Development fallback paths
+        let candidates = [
+            "/Users/stevenjackson/Documents/github/knowledge-tree-alpha/src/knowledge_compiler/ingestion/stealth_cli.py",
+            "/Users/stevenjackson/Documents/github/knowledge-tree-alpha/macos/Sources/KnowledgeCompiler/Resources/stealth_cli.py",
+        ]
+        for path in candidates {
+            if FileManager.default.fileExists(atPath: path) {
+                return path
+            }
+        }
+        // Fallback: try to run as module (requires PYTHONPATH)
+        return "-m knowledge_compiler.ingestion.stealth_cli"
+    }
+
+    enum ScraperError: Error, LocalizedError {
+    case stealthFailed(String)
+    case noPostsFound
+    case platformUnsupported(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .stealthFailed(let msg): return "Stealth scrape failed: \(msg)"
+        case .noPostsFound: return "No posts extracted"
+        case .platformUnsupported(let p): return "Platform not supported: \(p)"
+        }
+    }
+}
+
+func scrape(url: URL) async throws -> ProfileScrapeResult {
+    let host = url.host ?? ""
+    let platform = detectPlatform(host: host)
+    let handle = extractHandle(url: url, platform: platform)
+
+    log.emit(.info, "scraper", "beginning profile scrape — @\(handle) on \(platform)")
+
+    let posts: [String]
+    if platform == "threads" && useStealthForThreads {
+        posts = try await scrapeThreadsWithStealth(handle: handle, sourceURL: url.absoluteString)
+    } else {
+        posts = try await scrapePosts(url: url, platform: platform)
+    }
+
+    guard !posts.isEmpty else {
+        throw ScraperError.noPostsFound
+    }
+
+    let reversed = Array(posts.reversed())
+
+    let mdContent = generateMarkdown(handle: handle, platform: platform, sourceURL: url.absoluteString, posts: reversed)
+    let mdURL = try saveMarkdown(content: mdContent, handle: handle, platform: platform)
+
+    log.emit(.success, "scraper", "profile scrape complete — \(reversed.count) posts → \(mdURL.lastPathComponent)")
+
+    return ProfileScrapeResult(
+        handle: handle,
+        platform: platform,
+        postCount: reversed.count,
+        mdURL: mdURL,
+        scrapedAt: Date()
+    )
+}
 
     func teardown() {
         webView?.stopLoading()

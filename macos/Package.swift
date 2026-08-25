@@ -11,6 +11,7 @@ let package = Package(
             resources: [
                 .copy("Resources/trunk.html"),
                 .copy("Resources/three.min.js"),
+                .copy("Resources/stealth_cli.py"),
             ]
         )
     ]
