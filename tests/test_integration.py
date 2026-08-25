@@ -10,7 +10,7 @@ import pytest
 from knowledge_compiler.graph.store import GraphStore
 from knowledge_compiler.ingestion.crawler import Crawler
 from knowledge_compiler.ingestion.fetcher import Fetcher
-from knowledge_compiler.ingestion.parser import Parser
+from knowledge_compiler.ingestion.cleaner import ContentCleaner
 from knowledge_compiler.semantic.compiler import SemanticCompiler
 from knowledge_compiler.social.profiler import SocialProfiler
 from knowledge_compiler.telemetry import EventBus, EventV2
@@ -52,14 +52,14 @@ class TestCrawlerIntegration:
         )
 
     @pytest.fixture
-    def parser(self) -> Parser:
-        return Parser()
+    def cleaner(self) -> ContentCleaner:
+        return ContentCleaner()
 
     @pytest.fixture
-    def crawler(self, fetcher: Fetcher, parser: Parser, graph: GraphStore, bus: EventBus) -> Crawler:
+    def crawler(self, fetcher: Fetcher, cleaner: ContentCleaner, graph: GraphStore, bus: EventBus) -> Crawler:
         return Crawler(
             fetcher=fetcher,
-            parser=parser,
+            cleaner=cleaner,
             max_depth=2,
             graph=graph,
             max_content_chars=5000,
@@ -153,7 +153,7 @@ class TestSocialProfilerIntegration:
     def test_compile_emits_versioned_events(self) -> None:
         bus = EventBus(enabled=True)
         graph = GraphStore(event_bus=bus)
-        parser = Parser()
+        cleaner = ContentCleaner()
         fetcher = Fetcher(
             user_agent="TestAgent/1.0",
             timeout=10.0,
@@ -162,7 +162,7 @@ class TestSocialProfilerIntegration:
             event_bus=bus,
         )
         profiler = SocialProfiler(
-            fetcher=fetcher, parser=parser, graph=graph, max_posts=5, event_bus=bus
+            fetcher=fetcher, cleaner=cleaner, graph=graph, max_posts=5, event_bus=bus
         )
 
         events: list[EventV2] = []
@@ -197,7 +197,7 @@ class TestSocialProfilerIntegration:
     def test_unsupported_platform_returns_error(self) -> None:
         bus = EventBus(enabled=True)
         graph = GraphStore(event_bus=bus)
-        parser = Parser()
+        cleaner = ContentCleaner()
         fetcher = Fetcher(
             user_agent="TestAgent/1.0",
             timeout=10.0,
@@ -206,7 +206,7 @@ class TestSocialProfilerIntegration:
             event_bus=bus,
         )
         profiler = SocialProfiler(
-            fetcher=fetcher, parser=parser, graph=graph, max_posts=5, event_bus=bus
+            fetcher=fetcher, cleaner=cleaner, graph=graph, max_posts=5, event_bus=bus
         )
 
         dossier = asyncio.run(profiler.compile(handle="user", platform="unsupported"))

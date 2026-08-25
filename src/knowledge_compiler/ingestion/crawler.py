@@ -2,15 +2,19 @@
 
 Formal guarantee
 ----------------
-- Crawl complexity: O(V + E) where V = unique pages visited,
-  E = unique edges discovered, within the depth-bounded induced subgraph.
-- The state DAG (depth-ordered queue) ensures no node is visited twice
-  and that depth strictly increases along every path.
-- Pending nodes are flushed to SQLite in a single batch at crawl completion.
-- Each crawl session records a tree structure showing exact link chains followed.
+- Crawl complexity: O(V + E) where V = unique pages visited and E = unique
+  edges discovered, within the depth-bounded induced subgraph.
+- Frontier invariants: a URL enters the queue at most once (``queued`` set,
+  O(1) membership) and is fetched at most once (``visited`` set).  Queue
+  operations are O(1) via ``collections.deque`` — the legacy list-based
+  ``pop(0)``, O(n) per call, degraded the traversal to O(V²).
+- Each crawl session records an explicit tree: every node persists its
+  ``crawl_id``, ``parent_url`` and monotonic ``crawl_order``.
 """
 
 from __future__ import annotations
+
+from collections import deque
 
 from ..graph.store import GraphStore
 from ..telemetry import EventBus
@@ -57,6 +61,13 @@ class Crawler:
         "_target_language",
     )
 
+    #: Minimum sample length for reliable language detection.
+    _MIN_DETECT_CHARS: int = 20
+    #: Confidence floor below which translation is refused.
+    _MIN_TRANSLATE_CONFIDENCE: float = 0.7
+    #: Upper bound on text handed to a translation backend per page.
+    _TRANSLATE_SAMPLE_CHARS: int = 5000
+
     def __init__(
         self,
         fetcher: Fetcher,
@@ -88,7 +99,9 @@ class Crawler:
         crawl_id = self._graph.start_crawl_session(start_url, self._max_depth)
 
         visited: set[str] = set()
-        queue: list[tuple[str, int, str | None, int]] = [(start_url, 0, None, 0)]
+        queued: set[str] = {start_url}
+        # Elements: (url, depth, parent_url)
+        frontier: deque[tuple[str, int, str | None]] = deque([(start_url, 0, None)])
         crawl_order = 0
 
         self._event_bus.emit(
@@ -98,12 +111,11 @@ class Crawler:
             version="v2",
         )
 
-        while queue:
-            current_url, depth, parent_url, order = queue.pop(0)
+        while frontier:
+            current_url, depth, parent_url = frontier.popleft()
 
-            if current_url in visited or depth > self._max_depth:
+            if depth > self._max_depth:
                 continue
-
             visited.add(current_url)
             crawl_order += 1
 
@@ -119,17 +131,21 @@ class Crawler:
 
             text, links = self._cleaner.clean(html, current_url)
 
-            detected_lang = None
+            detected_lang: str | None = None
             translated = False
-            if self._lang_detector and len(text) >= 20:
+            if self._lang_detector and len(text) >= self._MIN_DETECT_CHARS:
                 lang_result = self._lang_detector.detect(text)
                 if lang_result:
                     detected_lang = lang_result.code
-                    if (lang_result.code != self._target_language
-                        and lang_result.confidence > 0.7
-                        and self._translator):
+                    needs_translation = (
+                        lang_result.code != self._target_language
+                        and lang_result.confidence > self._MIN_TRANSLATE_CONFIDENCE
+                        and self._translator is not None
+                    )
+                    if needs_translation:
+                        assert self._translator is not None
                         trans_result = await self._translator.translate(
-                            text[:5000],
+                            text[: self._TRANSLATE_SAMPLE_CHARS],
                             source_lang=lang_result.code,
                             target_lang=self._target_language,
                         )
@@ -165,27 +181,21 @@ class Crawler:
             )
 
             if depth < self._max_depth:
+                enqueue_depth = depth + 1
                 for link in links:
-                    self._graph.add_edge(
-                        source=current_url,
-                        target=link,
-                        relation="links_to",
-                    )
-                    if link not in visited:
-                        queue.append((link, depth + 1, current_url, crawl_order))
+                    self._graph.add_edge(source=current_url, target=link, relation="links_to")
+                    if link not in visited and link not in queued:
+                        queued.add(link)
+                        frontier.append((link, enqueue_depth, current_url))
 
         self._graph.flush()
         self._graph.end_crawl_session(crawl_id)
 
+        nodes, edges = self._graph.node_count, self._graph.edge_count
         self._event_bus.emit(
             "crawl:complete",
             "Crawler",
-            {
-                "nodes": self._graph.node_count,
-                "edges": self._graph.edge_count,
-                "crawl_id": crawl_id,
-            },
+            {"nodes": nodes, "edges": edges, "crawl_id": crawl_id},
             version="v2",
         )
-
-        return self._graph.node_count, self._graph.edge_count
+        return nodes, edges

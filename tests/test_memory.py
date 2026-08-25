@@ -19,7 +19,7 @@ import pytest
 from knowledge_compiler.graph.store import GraphStore
 from knowledge_compiler.ingestion.crawler import Crawler
 from knowledge_compiler.ingestion.fetcher import Fetcher
-from knowledge_compiler.ingestion.parser import Parser
+from knowledge_compiler.ingestion.cleaner import ContentCleaner
 from knowledge_compiler.telemetry import EventBus, EventV2, EventV2
 
 
@@ -216,7 +216,7 @@ class TestCrawlMemoryStability:
     ) -> Crawler:
         return Crawler(
             fetcher=fetcher,
-            parser=Parser(),
+            cleaner=ContentCleaner(),
             max_depth=1,
             graph=graph,
             max_content_chars=3000,

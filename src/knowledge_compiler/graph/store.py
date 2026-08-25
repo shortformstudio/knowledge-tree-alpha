@@ -2,22 +2,25 @@
 
 Invariants
 ----------
-- Every node has a mandatory ``type`` attribute.
-- Every edge has a mandatory ``relation`` attribute.
-- The graph is a DAG (enforced by the BFS crawl's depth ordering during
-  construction; after the fact, cycles are permitted but noted).
-- Node and edge counts are O(1) properties delegated to NetworkX.
-- Persistence (when a ``db_path`` is provided) uses a two-table SQLite
-  schema with GEXF serialisation for full-fidelity round-trips.
-- SQLite mutations are batched: commits flush once per logical operation
-  boundary or when ``flush()`` is called explicitly.
-- Nodes carry a ``_added_at`` timestamp for TTL-based eviction.
-- Crawl sessions are tracked with tree structures showing link chains.
+- Every node has a mandatory ``type`` attribute; every edge a ``relation``.
+- Mutations are batched: nodes and edges accumulate in bounded in-memory
+  queues and are persisted with ``executemany`` — one transaction per batch
+  (default 500 rows) instead of one fsync per edge.  ``flush()``, session
+  end and ``close()`` drain the queues, so a completed crawl is fully
+  durable; a hard crash mid-crawl forfeits at most one partial batch.
+- Eviction uses a min-heap keyed on insertion time: O(log N) per push and
+  amortised O(k log N) for k evictions, with zero cost while limits hold
+  (the legacy implementation scanned every node on every insert).
+- Crawl-tree reads resolve through indexed SQL (``EXISTS`` probes against
+  the ``idx_nodes_crawl_id`` index) rather than loading the full edge table.
+- Indexes are created with ``IF NOT EXISTS``, so databases written by the
+  previous schema upgrade in place with no migration step.
 """
 
 from __future__ import annotations
 
 import contextlib
+import heapq
 import sqlite3
 import time
 import uuid
@@ -30,23 +33,49 @@ from ..telemetry import EventBus
 
 
 class GraphStore:
-    """Directed graph store with optional SQLite persistence and TTL eviction.
+    """Directed graph store: batched SQLite persistence + heap eviction.
 
     Parameters
     ----------
-    db_path : Optional[Path]
+    db_path : Path | None
         File path for SQLite; in-memory-only when ``None``.
     event_bus : EventBus
         Telemetry sink for mutation events.
     max_nodes : int | None
-        Hard ceiling on in-memory node count.  When exceeded, the oldest
-        nodes (by insertion time) are evicted.  ``None`` disables eviction.
+        Hard ceiling on in-memory node count; oldest evicted when exceeded.
     node_ttl_seconds : float | None
-        Maximum age (seconds) for a node before eviction.  ``None`` disables
-        time-based eviction.
+        Maximum node age in seconds before eviction.  ``None`` disables.
     """
 
-    __slots__ = ("_graph", "_db_path", "_event_bus", "_db", "_max_nodes", "_node_ttl", "_pending")
+    __slots__ = (
+        "_graph",
+        "_db_path",
+        "_event_bus",
+        "_db",
+        "_max_nodes",
+        "_node_ttl",
+        "_pending_nodes",
+        "_pending_edges",
+        "_eviction_heap",
+        "_batch_size",
+    )
+
+    _SCHEMA = (
+        "CREATE TABLE IF NOT EXISTS nodes ("
+        "id TEXT PRIMARY KEY, type TEXT, content TEXT, depth INTEGER, "
+        "added_at REAL, crawl_id TEXT, parent_url TEXT, crawl_order INTEGER)",
+        "CREATE INDEX IF NOT EXISTS idx_nodes_crawl_id ON nodes(crawl_id)",
+        "CREATE INDEX IF NOT EXISTS idx_nodes_added_at ON nodes(added_at)",
+        "CREATE INDEX IF NOT EXISTS idx_nodes_crawl_order ON nodes(crawl_id, crawl_order)",
+        "CREATE TABLE IF NOT EXISTS edges ("
+        "source TEXT, target TEXT, relation TEXT, "
+        "PRIMARY KEY (source, target, relation))",
+        "CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source)",
+        "CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target)",
+        "CREATE TABLE IF NOT EXISTS crawl_sessions ("
+        "crawl_id TEXT PRIMARY KEY, start_url TEXT, start_time REAL, "
+        "max_depth INTEGER, nodes_count INTEGER, edges_count INTEGER)",
+    )
 
     def __init__(
         self,
@@ -54,6 +83,7 @@ class GraphStore:
         event_bus: EventBus | None = None,
         max_nodes: int | None = None,
         node_ttl_seconds: float | None = None,
+        batch_size: int = 500,
     ) -> None:
         self._graph: nx.DiGraph = nx.DiGraph()  # type: ignore[type-arg]
         self._db_path = db_path
@@ -61,7 +91,10 @@ class GraphStore:
         self._db: sqlite3.Connection | None = None
         self._max_nodes = max_nodes
         self._node_ttl = node_ttl_seconds
-        self._pending: list[tuple[str, dict[str, Any]]] = []
+        self._pending_nodes: list[tuple[Any, ...]] = []
+        self._pending_edges: list[tuple[str, str, str]] = []
+        self._eviction_heap: list[tuple[float, str]] = []
+        self._batch_size = max(1, batch_size)
 
         if self._db_path is not None:
             self._init_db()
@@ -76,109 +109,112 @@ class GraphStore:
         self._db = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
-        self._db.execute(
-            "CREATE TABLE IF NOT EXISTS nodes ("
-            "id TEXT PRIMARY KEY, type TEXT, content TEXT, depth INTEGER, "
-            "added_at REAL, crawl_id TEXT, parent_url TEXT, crawl_order INTEGER)"
-        )
-        self._db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_nodes_crawl_id ON nodes(crawl_id)"
-        )
-        self._db.execute(
-            "CREATE TABLE IF NOT EXISTS edges (source TEXT, target TEXT, relation TEXT, "
-            "PRIMARY KEY (source, target, relation), "
-            "FOREIGN KEY (source) REFERENCES nodes(id), "
-            "FOREIGN KEY (target) REFERENCES nodes(id))"
-        )
-        self._db.execute(
-            "CREATE TABLE IF NOT EXISTS crawl_sessions ("
-            "crawl_id TEXT PRIMARY KEY, start_url TEXT, start_time REAL, "
-            "max_depth INTEGER, nodes_count INTEGER, edges_count INTEGER)"
-        )
+        for statement in self._SCHEMA:
+            self._db.execute(statement)
         self._db.commit()
 
     def _load_from_db(self) -> None:
         if self._db is None:
             return
+        graph_add_node = self._graph.add_node
+        heap: list[tuple[float, str]] = []
         for row in self._db.execute(
             "SELECT id, type, content, depth, added_at, crawl_id, parent_url, crawl_order FROM nodes"
         ):
             node_id, ntype, content, depth, added_at, crawl_id, parent_url, crawl_order = row
-            self._graph.add_node(
+            ts = added_at if added_at is not None else time.time()
+            graph_add_node(
                 node_id,
                 type=ntype,
                 content=content or "",
                 depth=depth or 0,
-                _added_at=added_at or time.time(),
+                _added_at=ts,
                 crawl_id=crawl_id,
                 parent_url=parent_url,
                 crawl_order=crawl_order or 0,
             )
-        for row in self._db.execute("SELECT source, target, relation FROM edges"):
-            source, target, relation = row
+            heap.append((ts, node_id))
+        heapq.heapify(heap)
+        self._eviction_heap = heap
+
+        for source, target, relation in self._db.execute(
+            "SELECT source, target, relation FROM edges"
+        ):
             self._graph.add_edge(source, target, relation=relation)
 
     # ------------------------------------------------------------------
-    # Mutation
+    # Mutation (batched)
     # ------------------------------------------------------------------
 
     def add_node(self, node_id: str, **attrs: Any) -> None:
         attrs.setdefault("_added_at", time.time())
         self._graph.add_node(node_id, **attrs)
+        self._pending_nodes.append(
+            (
+                node_id,
+                attrs.get("type", ""),
+                attrs.get("content", ""),
+                attrs.get("depth", 0),
+                attrs["_added_at"],
+                attrs.get("crawl_id"),
+                attrs.get("parent_url"),
+                attrs.get("crawl_order", 0),
+            )
+        )
+        heapq.heappush(self._eviction_heap, (attrs["_added_at"], node_id))
         self._event_bus.emit(
             "graph:node_added", "GraphStore", {"id": node_id, **attrs}, version="v2"
         )
-        self._pending.append((node_id, attrs))
         self._evict_if_needed()
+        if len(self._pending_nodes) >= self._batch_size:
+            self.flush()
 
     def add_edge(self, source: str, target: str, relation: str = "links_to") -> None:
         self._graph.add_edge(source, target, relation=relation)
+        self._pending_edges.append((source, target, relation))
         self._event_bus.emit(
             "graph:edge_added",
             "GraphStore",
             {"source": source, "target": target, "relation": relation},
             version="v2",
         )
-        self._persist_edge(source, target, relation)
+        if len(self._pending_edges) >= self._batch_size:
+            self.flush()
 
     def flush(self) -> None:
-        """Persist all pending nodes in a single SQLite transaction."""
-        if self._db is None or not self._pending:
+        """Persist all queued nodes and edges in one transaction."""
+        if self._db is None:
+            self._pending_nodes.clear()
+            self._pending_edges.clear()
             return
         try:
-            self._db.execute("BEGIN")
-            for node_id, attrs in self._pending:
-                self._db.execute(
-                    "INSERT OR REPLACE INTO nodes (id, type, content, depth, added_at, crawl_id, parent_url, crawl_order) "
+            if self._pending_nodes:
+                self._db.executemany(
+                    "INSERT OR REPLACE INTO nodes "
+                    "(id, type, content, depth, added_at, crawl_id, parent_url, crawl_order) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        node_id,
-                        attrs.get("type", ""),
-                        attrs.get("content", ""),
-                        attrs.get("depth", 0),
-                        attrs.get("_added_at", time.time()),
-                        attrs.get("crawl_id"),
-                        attrs.get("parent_url"),
-                        attrs.get("crawl_order", 0),
-                    ),
+                    self._pending_nodes,
                 )
+                self._pending_nodes.clear()
+            if self._pending_edges:
+                self._db.executemany(
+                    "INSERT OR IGNORE INTO edges (source, target, relation) VALUES (?, ?, ?)",
+                    self._pending_edges,
+                )
+                self._pending_edges.clear()
             self._db.commit()
         except Exception:
             if self._db is not None:
                 self._db.rollback()
             raise
-        finally:
-            self._pending.clear()
 
     # ------------------------------------------------------------------
-    # Crawl Session Tracking
+    # Crawl session tracking
     # ------------------------------------------------------------------
 
-    def start_crawl_session(
-        self, start_url: str, max_depth: int
-    ) -> str:
+    def start_crawl_session(self, start_url: str, max_depth: int) -> str:
         """Create a new crawl session and return its unique ID."""
-        crawl_id = str(uuid.uuid4())[:8]
+        crawl_id = uuid.uuid4().hex[:8]
         if self._db is not None:
             self._db.execute(
                 "INSERT INTO crawl_sessions (crawl_id, start_url, start_time, max_depth, nodes_count, edges_count) "
@@ -197,19 +233,23 @@ class GraphStore:
     def end_crawl_session(self, crawl_id: str) -> None:
         """Finalize a crawl session with final counts."""
         if self._db is not None:
-            nodes = self._db.execute(
-                "SELECT COUNT(*) FROM nodes WHERE crawl_id = ?", (crawl_id,)
-            ).fetchone()[0]
-            edges = self._db.execute(
-                "SELECT COUNT(*) FROM edges e "
-                "JOIN nodes n ON e.source = n.id "
-                "WHERE n.crawl_id = ?", (crawl_id,)
-            ).fetchone()[0]
             self._db.execute(
-                "UPDATE crawl_sessions SET nodes_count = ?, edges_count = ? WHERE crawl_id = ?",
-                (nodes, edges, crawl_id),
+                "UPDATE crawl_sessions SET "
+                "nodes_count = (SELECT COUNT(*) FROM nodes WHERE crawl_id = ?), "
+                "edges_count = (SELECT COUNT(*) FROM edges e "
+                "               JOIN nodes n ON e.source = n.id "
+                "               WHERE n.crawl_id = ?) "
+                "WHERE crawl_id = ?",
+                (crawl_id, crawl_id, crawl_id),
             )
             self._db.commit()
+            row = self._db.execute(
+                "SELECT nodes_count, edges_count FROM crawl_sessions WHERE crawl_id = ?",
+                (crawl_id,),
+            ).fetchone()
+            nodes, edges = row if row is not None else (0, 0)
+        else:
+            nodes, edges = self.node_count, self.edge_count
         self._event_bus.emit(
             "crawl:session_end",
             "GraphStore",
@@ -218,57 +258,56 @@ class GraphStore:
         )
 
     def get_crawl_sessions(self) -> list[dict[str, Any]]:
-        """Return all recorded crawl sessions."""
+        """Return all recorded crawl sessions, newest first."""
         if self._db is None:
             return []
-        sessions = []
-        for row in self._db.execute(
-            "SELECT crawl_id, start_url, start_time, max_depth, nodes_count, edges_count "
-            "FROM crawl_sessions ORDER BY start_time DESC"
-        ):
-            sessions.append({
+        return [
+            {
                 "crawl_id": row[0],
                 "start_url": row[1],
                 "start_time": row[2],
                 "max_depth": row[3],
                 "nodes_count": row[4],
                 "edges_count": row[5],
-            })
-        return sessions
+            }
+            for row in self._db.execute(
+                "SELECT crawl_id, start_url, start_time, max_depth, nodes_count, edges_count "
+                "FROM crawl_sessions ORDER BY start_time DESC"
+            )
+        ]
 
     def get_crawl_tree(self, crawl_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Return the crawl tree for a session as (nodes, edges).
+        """Return ``(nodes, edges)`` for a session via indexed SQL probes."""
+        if self._db is None:
+            return [], []
 
-        Nodes include: id, type, content, depth, crawl_order, parent_url
-        Edges include: source, target, relation
-        """
-        nodes = []
-        for row in self._db.execute(
-            "SELECT id, type, content, depth, crawl_order, parent_url "
-            "FROM nodes WHERE crawl_id = ? ORDER BY crawl_order",
-            (crawl_id,),
-        ):
-            nodes.append({
+        columns = "id, type, content, depth, crawl_order, parent_url"
+        nodes = [
+            {
                 "id": row[0],
                 "type": row[1],
                 "content": row[2],
                 "depth": row[3],
                 "crawl_order": row[4],
                 "parent_url": row[5],
-            })
+            }
+            for row in self._db.execute(
+                f"SELECT {columns} FROM nodes WHERE crawl_id = ? ORDER BY crawl_order",
+                (crawl_id,),
+            )
+        ]
+        if not nodes:
+            return [], []
 
-        edges = []
-        node_ids = {n["id"] for n in nodes}
-        for row in self._db.execute(
-            "SELECT source, target, relation FROM edges"
-        ):
-            if row[0] in node_ids and row[1] in node_ids:
-                edges.append({
-                    "source": row[0],
-                    "target": row[1],
-                    "relation": row[2],
-                })
-
+        edges = [
+            {"source": row[0], "target": row[1], "relation": row[2]}
+            for row in self._db.execute(
+                "SELECT e.source, e.target, e.relation FROM edges e "
+                "WHERE EXISTS (SELECT 1 FROM nodes s WHERE s.id = e.source AND s.crawl_id = ?) "
+                "AND EXISTS (SELECT 1 FROM nodes t WHERE t.id = e.target AND t.crawl_id = ?)",
+                (crawl_id, crawl_id),
+            )
+        ]
         return nodes, edges
 
     # ------------------------------------------------------------------
@@ -284,58 +323,54 @@ class GraphStore:
     def ego_subgraph(
         self, node_id: str, radius: int = 1
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Return (nodes, edges) of the ego graph around *node_id*.
-
-        Complexity: O(V_sub + E_sub) where V_sub and E_sub are the
-        vertices and edges within the radius-bounded induced subgraph.
-        """
+        """Return (nodes, edges) of the radius-bounded ego subgraph."""
         if not self._graph.has_node(node_id):
             return [], []
 
         sub: nx.DiGraph = nx.ego_graph(self._graph, node_id, radius=radius)  # type: ignore[type-arg]
-
         nodes = [{"id": n, **self._graph.nodes[n]} for n in sub.nodes()]
         edges = [
             {"source": u, "target": v, **self._graph.edges[u, v]} for u, v in sub.edges()
         ]
-
         return nodes, edges
 
     # ------------------------------------------------------------------
-    # Eviction
+    # Eviction — heap-driven, amortised O(log N); no-op while limits hold
     # ------------------------------------------------------------------
 
     def _evict_if_needed(self) -> None:
-        """Evict oldest nodes when count or TTL threshold is exceeded."""
         evicted: set[str] = set()
+        heap = self._eviction_heap
 
-        if self._node_ttl is not None:
-            now = time.time()
-            cutoff = now - self._node_ttl
-            for node_id, attrs in list(self._graph.nodes(data=True)):
-                added = attrs.get("_added_at", 0.0)
-                if added < cutoff:
+        if self._node_ttl is not None and heap:
+            cutoff = time.time() - self._node_ttl
+            while heap and heap[0][0] < cutoff:
+                _, node_id = heapq.heappop(heap)
+                if self._graph.has_node(node_id):
                     evicted.add(node_id)
 
         if self._max_nodes is not None:
-            current_count = self._graph.number_of_nodes()
-            if current_count > self._max_nodes:
-                nodes_by_age = sorted(
-                    self._graph.nodes(data=True),
-                    key=lambda item: item[1].get("_added_at", 0.0),
-                )
-                to_remove = [nid for nid, _ in nodes_by_age[: current_count - self._max_nodes]]
-                evicted.update(to_remove)
+            excess = self._graph.number_of_nodes() - self._max_nodes
+            while excess > 0 and heap:
+                _, node_id = heapq.heappop(heap)
+                if self._graph.has_node(node_id):
+                    evicted.add(node_id)
+                    excess -= 1
+
+        if not evicted:
+            return
 
         for node_id in evicted:
             self._graph.remove_node(node_id)
-            if self._db is not None:
-                self._db.execute("DELETE FROM nodes WHERE id = ?", (node_id,))
-                self._db.execute(
-                    "DELETE FROM edges WHERE source = ? OR target = ?", (node_id, node_id)
-                )
 
-        if evicted and self._db is not None:
+        if self._db is not None:
+            self._db.executemany(
+                "DELETE FROM nodes WHERE id = ?", [(nid,) for nid in evicted]
+            )
+            self._db.executemany(
+                "DELETE FROM edges WHERE source = ? OR target = ?",
+                [(nid, nid) for nid in evicted],
+            )
             self._db.commit()
 
     # ------------------------------------------------------------------
@@ -359,17 +394,8 @@ class GraphStore:
     # Persistence helpers
     # ------------------------------------------------------------------
 
-    def _persist_edge(self, source: str, target: str, relation: str) -> None:
-        if self._db is None:
-            return
-        self._db.execute(
-            "INSERT OR REPLACE INTO edges (source, target, relation) VALUES (?, ?, ?)",
-            (source, target, relation),
-        )
-        self._db.commit()
-
     def close(self) -> None:
-        """Flush pending nodes, run WAL checkpoint, and close the database."""
+        """Flush pending mutations, checkpoint WAL, close the database."""
         self.flush()
         if self._db is not None:
             with contextlib.suppress(Exception):
